@@ -3,7 +3,7 @@ FROM node:20-alpine AS base
 
 # Install dependencies only when needed
 FROM base AS deps
-RUN apk add --no-cache libc6-compat
+RUN apk add --no-cache libc6-compat openssl1.1-compat
 WORKDIR /app
 
 # Install dependencies based on the preferred package manager
@@ -30,6 +30,8 @@ RUN npm run build
 # Production image, copy all the files and run next
 FROM base AS runner
 WORKDIR /app
+
+RUN apk add --no-cache openssl1.1-compat
 
 ENV NODE_ENV production
 ENV NEXT_TELEMETRY_DISABLED 1
