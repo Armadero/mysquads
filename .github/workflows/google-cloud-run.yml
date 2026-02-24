@@ -29,8 +29,6 @@ jobs:
       - name: Configure Docker
         run: gcloud auth configure-docker
 
-        run: gcloud auth configure-docker
-
       - name: Build and Push Docker Image
         run: |
           docker build -t gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} .
