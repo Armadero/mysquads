@@ -26,15 +26,9 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Debug Credentials and Enable APIs
-        run: |
-          echo "Checking credentials format..."
-          if [[ "${{ secrets.GCP_SA_KEY }}" == {* ]]; then echo "JSON format looks OK"; else echo "ERROR: GCP_SA_KEY does not start with { - check your secret!"; exit 1; fi
-          gcloud config set core/project ${{ env.PROJECT_ID }}
-          # Try to enable required APIs automatically
-          gcloud services enable run.googleapis.com containerregistry.googleapis.com cloudbuild.googleapis.com
-
       - name: Configure Docker
+        run: gcloud auth configure-docker
+
         run: gcloud auth configure-docker
 
       - name: Build and Push Docker Image
