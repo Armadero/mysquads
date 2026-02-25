@@ -1,18 +1,38 @@
 "use client";
 import { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { Plus, Edit2, Trash2, Settings, X, Palette, ChevronRight, CheckCircle } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function RolesPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [roles, setRoles] = useState<any[]>([]);
     const [isEditing, setIsEditing] = useState(false);
     const [loading, setLoading] = useState(false);
-    const [currentRole, setCurrentRole] = useState<any>({ name: "", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
+    const [currentRole, setCurrentRole] = useState<any>({ name: "DEVELOPER", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
+
+    const roleTypeLabels: Record<string, string> = {
+        SCRUM_MASTER: "Scrum Master",
+        SYSTEM_ANALYST: "Analista de Sistemas",
+        PRODUCT_OWNER: "Product Owner",
+        DEVELOPER: "Desenvolvedor",
+        QA_ANALYST: "Analista de Teste",
+        SPECIALIST: "Especialista",
+        BUSINESS_ANALYST: "Analista de Negócios",
+        PRODUCT_MANAGER: "Product Manager"
+    };
 
     useEffect(() => {
-        if (session) fetchRoles();
-    }, [session]);
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (user) fetchRoles();
+    }, [user]);
 
     const fetchRoles = async () => {
         const res = await fetch("/api/roles");
@@ -33,7 +53,7 @@ export default function RolesPage() {
 
         if (res.ok) {
             setIsEditing(false);
-            setCurrentRole({ name: "", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
+            setCurrentRole({ name: "DEVELOPER", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
             fetchRoles();
         }
         setLoading(false);
@@ -47,7 +67,7 @@ export default function RolesPage() {
         if (res.ok) fetchRoles();
     };
 
-    if (!session?.user || (session.user as any).type !== "COORDINATOR") return null;
+    if (!user || user.user_metadata?.type !== "COORDINATOR") return null;
 
     const INPUT = "w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all";
     const LABEL = "block text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1.5";
@@ -63,7 +83,7 @@ export default function RolesPage() {
                 {!isEditing && (
                     <button
                         onClick={() => {
-                            setCurrentRole({ name: "", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
+                            setCurrentRole({ name: "DEVELOPER", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
                             setIsEditing(true);
                         }}
                         className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md shadow-blue-500/10 transition-colors"
@@ -84,14 +104,17 @@ export default function RolesPage() {
                     <form onSubmit={handleSave} className="p-6 space-y-6">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="space-y-1 md:col-span-2">
-                                <label className={LABEL}>Nome do Cargo</label>
-                                <input
+                                <label className={LABEL}>Papel</label>
+                                <select
                                     required
                                     className={INPUT}
-                                    placeholder="Ex: Desenvolvedor Senior"
-                                    value={currentRole.name || ""}
+                                    value={currentRole.name || "DEVELOPER"}
                                     onChange={e => setCurrentRole({ ...currentRole, name: e.target.value })}
-                                />
+                                >
+                                    {Object.entries(roleTypeLabels).map(([key, label]) => (
+                                        <option key={key} value={key}>{label}</option>
+                                    ))}
+                                </select>
                             </div>
 
                             <div className="space-y-1">
@@ -164,7 +187,7 @@ export default function RolesPage() {
                     <table className="w-full text-left">
                         <thead>
                             <tr className="bg-zinc-50 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">
-                                <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Cargo / Função</th>
+                                <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Papel</th>
                                 <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-center">Pessoas p/ Squad</th>
                                 <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-center">Máx. Squads</th>
                                 <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-center">Ordem</th>
@@ -177,7 +200,7 @@ export default function RolesPage() {
                                     <td className="px-6 py-4">
                                         <div className="flex items-center gap-3">
                                             <div className="w-2 h-2 rounded-full shadow-inner" style={{ backgroundColor: role.defaultColor }}></div>
-                                            <span className="font-bold text-sm text-zinc-800 dark:text-zinc-100">{role.name}</span>
+                                            <span className="font-bold text-sm text-zinc-800 dark:text-zinc-100">{roleTypeLabels[role.name as string] || role.name}</span>
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 text-center">

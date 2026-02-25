@@ -1,11 +1,20 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { z } from "zod";
 
+const RoleTypeEnum = z.enum([
+    "SCRUM_MASTER",
+    "SYSTEM_ANALYST",
+    "PRODUCT_OWNER",
+    "DEVELOPER",
+    "QA_ANALYST",
+    "SPECIALIST",
+    "BUSINESS_ANALYST",
+    "PRODUCT_MANAGER"
+]);
+
 const RoleUpdateSchema = z.object({
-    name: z.string().min(1, "Name is required"),
+    name: RoleTypeEnum,
     defaultColor: z.string().optional(),
     qtyPerSquad: z.number().int().min(1).default(1),
     maxSquads: z.number().int().min(1).optional(),
@@ -15,30 +24,38 @@ const RoleUpdateSchema = z.object({
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
     const { id } = await params;
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     try {
         const data = await req.json();
         const parsed = RoleUpdateSchema.parse(data);
 
-        const role = await prisma.role.update({
-            where: { id, coordinatorId: session.user.id },
-            data: {
+        const { data: role, error } = await supabase
+            .from("Role")
+            .update({
                 name: parsed.name,
                 defaultColor: parsed.defaultColor,
                 qtyPerSquad: parsed.qtyPerSquad,
                 maxSquads: parsed.maxSquads,
                 multipleSquads: parsed.multipleSquads,
                 order: parsed.order,
-            }
-        });
+            })
+            .eq("id", id)
+            .eq("coordinatorId", user.id) // RLS handles this, but explicit is good
+            .select()
+            .single();
 
+        if (error) throw error;
         return NextResponse.json(role);
-    } catch (error: unknown) {
-        if (error instanceof z.ZodError)
+    } catch (error: any) {
+        if (error instanceof z.ZodError) {
             return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
+        }
         console.error("[PUT /api/roles/:id]", error);
         return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
     }
@@ -46,17 +63,23 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
     const { id } = await params;
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     try {
-        await prisma.role.delete({
-            where: { id, coordinatorId: session.user.id }
-        });
+        const { error } = await supabase
+            .from("Role")
+            .delete()
+            .eq("id", id)
+            .eq("coordinatorId", user.id);
 
+        if (error) throw error;
         return NextResponse.json({ success: true });
-    } catch (error: unknown) {
+    } catch (error: any) {
         console.error("[DELETE /api/roles/:id]", error);
         return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
     }

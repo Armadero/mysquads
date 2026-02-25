@@ -1,9 +1,9 @@
 "use client";
 import { useState } from "react";
-import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Lock, Mail, Loader2 } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
     const router = useRouter();
@@ -11,18 +11,24 @@ export default function LoginPage() {
     const [password, setPassword] = useState("");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
+    const supabase = createClient();
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
         setError("");
-        const res = await signIn("credentials", { email, password, redirect: false });
 
-        if (res?.error) {
-            setError("Credenciais inválidas. Verifique seus dados.");
+        const { error } = await supabase.auth.signInWithPassword({
+            email,
+            password,
+        });
+
+        if (error) {
+            setError(error.message || "Credenciais inválidas. Verifique seus dados.");
             setLoading(false);
         } else {
             router.push("/dashboard");
+            router.refresh();
         }
     };
 

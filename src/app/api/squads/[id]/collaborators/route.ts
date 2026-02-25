@@ -1,83 +1,129 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 
-export async function PUT(req: Request, props: { params: Promise<{ id: string }> }) {
-    const params = await props.params;
-    const session = await getServerSession(authOptions);
-    if (!session || (session.user as any).type !== "COORDINATOR") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
+    const { id } = await params;
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const { collaboratorIds } = await req.json(); // Array of strings
 
     // Verify squad belongs to coordinator
-    const squad = await prisma.squad.findFirst({
-        where: { id: params.id, coordinatorId: (session.user as any).id }
-    });
+    const { data: squad, error: squadError } = await supabase
+        .from("Squad")
+        .select("id")
+        .eq("id", id)
+        .eq("coordinatorId", user.id)
+        .single();
 
-    if (!squad) return NextResponse.json({ error: "Squad not found" }, { status: 404 });
+    if (squadError || !squad) {
+        return NextResponse.json({ error: "Squad not found" }, { status: 404 });
+    }
 
-    // Start Transaction to replace members
-    await prisma.$transaction([
-        prisma.squadCollaborator.deleteMany({
-            where: { squadId: params.id }
-        }),
-        prisma.squadCollaborator.createMany({
-            data: collaboratorIds.map((collabId: string) => ({
-                squadId: params.id,
-                collaboratorId: collabId
-            }))
-        })
-    ]);
+    // Replace members
+    const { error: deleteError } = await supabase
+        .from("SquadCollaborator")
+        .delete()
+        .eq("squadId", id);
+
+    if (deleteError) {
+        console.error("[PUT /api/squads/:id/collaborators] deleteError", deleteError);
+        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    }
+
+    if (collaboratorIds && collaboratorIds.length > 0) {
+        const inserts = collaboratorIds.map((collabId: string) => ({
+            squadId: id,
+            collaboratorId: collabId
+        }));
+
+        const { error: insertError } = await supabase
+            .from("SquadCollaborator")
+            .insert(inserts);
+
+        if (insertError) {
+            console.error("[PUT /api/squads/:id/collaborators] insertError", insertError);
+            return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        }
+    }
 
     return NextResponse.json({ success: true });
 }
 
-export async function POST(req: Request, props: { params: Promise<{ id: string }> }) {
-    const params = await props.params;
-    const session = await getServerSession(authOptions);
-    if (!session || (session.user as any).type !== "COORDINATOR") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+    const { id } = await params;
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const { collaboratorId } = await req.json();
 
     // Verify squad belongs to coordinator
-    const squad = await prisma.squad.findFirst({
-        where: { id: params.id, coordinatorId: (session.user as any).id }
-    });
+    const { data: squad, error: squadError } = await supabase
+        .from("Squad")
+        .select("id")
+        .eq("id", id)
+        .eq("coordinatorId", user.id)
+        .single();
 
-    if (!squad) return NextResponse.json({ error: "Squad not found" }, { status: 404 });
+    if (squadError || !squad) {
+        return NextResponse.json({ error: "Squad not found" }, { status: 404 });
+    }
 
     // Add collaborator if not already in squad
-    const assignment = await prisma.squadCollaborator.upsert({
-        where: {
-            squadId_collaboratorId: {
-                squadId: params.id,
-                collaboratorId
-            }
-        },
-        update: {},
-        create: {
-            squadId: params.id,
-            collaboratorId
-        }
-    });
+    const { data: existing } = await supabase
+        .from("SquadCollaborator")
+        .select("id")
+        .eq("squadId", id)
+        .eq("collaboratorId", collaboratorId)
+        .single();
 
-    return NextResponse.json(assignment);
+    if (!existing) {
+        const { error: insertError } = await supabase
+            .from("SquadCollaborator")
+            .insert({
+                squadId: id,
+                collaboratorId
+            });
+
+        if (insertError) {
+            console.error("[POST /api/squads/:id/collaborators] insertError", insertError);
+            return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        }
+    }
+
+    // You can fetch and return the assignment if needed, we'll return a simple success
+    return NextResponse.json({ success: true });
 }
 
-export async function DELETE(req: Request, props: { params: Promise<{ id: string }> }) {
-    const params = await props.params;
-    const session = await getServerSession(authOptions);
-    if (!session || (session.user as any).type !== "COORDINATOR") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+    const { id } = await params;
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const { collaboratorId } = await req.json();
 
-    await prisma.squadCollaborator.deleteMany({
-        where: {
-            squadId: params.id,
-            collaboratorId
-        }
-    });
+    const { error } = await supabase
+        .from("SquadCollaborator")
+        .delete()
+        .eq("squadId", id)
+        .eq("collaboratorId", collaboratorId);
+
+    if (error) {
+        console.error("[DELETE /api/squads/:id/collaborators]", error);
+        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    }
 
     return NextResponse.json({ success: true });
 }

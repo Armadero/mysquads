@@ -1,10 +1,11 @@
 "use client";
 import { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { Plus, Search, Edit2, Trash2, UserPlus, Filter, X, ChevronDown, MoreVertical, Camera } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function CollaboratorsPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [collaborators, setCollaborators] = useState<any[]>([]);
     const [roles, setRoles] = useState<any[]>([]);
     const [isEditing, setIsEditing] = useState(false);
@@ -12,6 +13,7 @@ export default function CollaboratorsPage() {
     const [currentCollab, setCurrentCollab] = useState<any>({
         name: "",
         email: "",
+        matricula: "",
         address: "",
         deliveryAddress: "",
         contractType: "CLT",
@@ -25,10 +27,31 @@ export default function CollaboratorsPage() {
     });
     const [error, setError] = useState<string | null>(null);
 
+    const roleTypeLabels: Record<string, string> = {
+        SCRUM_MASTER: "Scrum Master",
+        SYSTEM_ANALYST: "Analista de Sistemas",
+        PRODUCT_OWNER: "Product Owner",
+        DEVELOPER: "Desenvolvedor",
+        QA_ANALYST: "Analista de Teste",
+        SPECIALIST: "Especialista",
+        BUSINESS_ANALYST: "Analista de Negócios",
+        PRODUCT_MANAGER: "Product Manager"
+    };
+
     useEffect(() => {
-        fetchCollaborators();
-        fetchRoles();
-    }, [session]);
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (user) {
+            fetchCollaborators();
+            fetchRoles();
+        }
+    }, [user]);
 
     const fetchCollaborators = async () => {
         const res = await fetch("/api/collaborators");
@@ -59,6 +82,7 @@ export default function CollaboratorsPage() {
                 setCurrentCollab({
                     name: "",
                     email: "",
+                    matricula: "",
                     address: "",
                     deliveryAddress: "",
                     contractType: "CLT",
@@ -140,10 +164,11 @@ export default function CollaboratorsPage() {
         if (res.ok) fetchCollaborators();
     };
 
-    if (!session?.user) return null;
-    const isCoordinator = (session.user as any).type === "COORDINATOR";
+    if (!user) return null;
+    const isCoordinator = user.user_metadata?.type === "COORDINATOR";
 
     const INPUT = "w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all";
+
     const LABEL = "block text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1.5";
 
     return (
@@ -159,6 +184,7 @@ export default function CollaboratorsPage() {
                             setCurrentCollab({
                                 name: "",
                                 email: "",
+                                matricula: "",
                                 address: "",
                                 deliveryAddress: "",
                                 contractType: "CLT",
@@ -241,12 +267,16 @@ export default function CollaboratorsPage() {
                                     <input required className={INPUT} type="email" value={currentCollab.email || ""} onChange={e => setCurrentCollab({ ...currentCollab, email: e.target.value })} placeholder="joao@empresa.com" />
                                 </div>
                                 <div className="space-y-1">
+                                    <label className={LABEL}>Matrícula</label>
+                                    <input className={INPUT} type="text" value={currentCollab.matricula || ""} onChange={e => setCurrentCollab({ ...currentCollab, matricula: e.target.value })} placeholder="Opcional" />
+                                </div>
+                                <div className="space-y-1">
                                     <label className={LABEL}>Cargo / Função</label>
                                     <div className="relative">
                                         <select required className={`${INPUT} appearance-none`} value={currentCollab.roleId || ""} onChange={e => setCurrentCollab({ ...currentCollab, roleId: e.target.value })}>
-                                            <option value="">Selecione um cargo...</option>
+                                            <option value="">Selecione um papel...</option>
                                             {roles.map(role => (
-                                                <option key={role.id} value={role.id}>{role.name}</option>
+                                                <option key={role.id} value={role.id}>{roleTypeLabels[role.name as string] || role.name}</option>
                                             ))}
                                         </select>
                                         <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" size={14} />
@@ -336,6 +366,7 @@ export default function CollaboratorsPage() {
                             <tr className="bg-zinc-50 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">
                                 <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Colaborador</th>
                                 <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Cargo</th>
+                                <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Matrícula</th>
                                 <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Admissão</th>
                                 <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Status</th>
                                 {isCoordinator && <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-right">Ações</th>}
@@ -362,8 +393,11 @@ export default function CollaboratorsPage() {
                                     <td className="px-6 py-4">
                                         <div className="flex items-center gap-2">
                                             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: collab.role?.defaultColor || '#cbd5e0' }}></div>
-                                            <span className="text-sm font-medium text-zinc-600 dark:text-zinc-300">{collab.role?.name || "Sem cargo"}</span>
+                                            <span className="text-sm font-medium text-zinc-600 dark:text-zinc-300">{collab.role ? roleTypeLabels[collab.role.name as string] || collab.role.name : "Sem papel"}</span>
                                         </div>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <div className="text-sm font-medium text-zinc-600 dark:text-zinc-300">{collab.matricula || "-"}</div>
                                     </td>
                                     <td className="px-6 py-4">
                                         <div className="text-xs text-zinc-500">{new Date(collab.admissionDate).toLocaleDateString()}</div>

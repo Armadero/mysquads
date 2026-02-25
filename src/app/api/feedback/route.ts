@@ -1,57 +1,51 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { FeedbackSchema } from "@/lib/schemas";
 import { z } from "zod";
 
 export async function GET() {
-    const session = await getServerSession(authOptions);
-    if (!session || (session.user.type !== "COORDINATOR" && session.user.type !== "MANAGER"))
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || (user.user_metadata?.type !== "COORDINATOR" && user.user_metadata?.type !== "MANAGER"))
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
         let feedbacks = [];
 
-        if (session.user.type === "COORDINATOR") {
-            feedbacks = await prisma.feedback.findMany({
-                where: { coordinatorId: session.user.id },
-                include: {
-                    collaborator: {
-                        select: {
-                            id: true,
-                            name: true,
-                            photoUrl: true,
-                            role: { select: { name: true } }
-                        }
-                    },
-                    coordinator: { select: { name: true } }
-                },
-                orderBy: { date: 'desc' }
-            });
+        if (user.user_metadata?.type === "COORDINATOR") {
+            const { data } = await supabase
+                .from('Feedback')
+                .select(`
+                    *,
+                    collaborator:Collaborator!collaboratorId(id, name, photoUrl, role:Role(name)),
+                    coordinator:User!coordinatorId(name)
+                `)
+                .eq('coordinatorId', user.id)
+                .order('date', { ascending: false });
+            feedbacks = data || [];
         } else {
             // MANAGER: Find approved coordinators
-            const links = await prisma.managerCoordinatorLink.findMany({
-                where: { managerId: session.user.id, status: "APPROVED" },
-                select: { coordinatorId: true }
-            });
-            const coordinatorIds = links.map(l => l.coordinatorId);
+            const { data: links } = await supabase
+                .from('ManagerCoordinatorLink')
+                .select('coordinatorId')
+                .eq('managerId', user.id)
+                .eq('status', 'APPROVED');
 
-            feedbacks = await prisma.feedback.findMany({
-                where: { coordinatorId: { in: coordinatorIds } },
-                include: {
-                    collaborator: {
-                        select: {
-                            id: true,
-                            name: true,
-                            photoUrl: true,
-                            role: { select: { name: true } }
-                        }
-                    },
-                    coordinator: { select: { name: true } }
-                },
-                orderBy: { date: 'desc' }
-            });
+            const coordinatorIds = links?.map(l => l.coordinatorId) || [];
+
+            if (coordinatorIds.length > 0) {
+                const { data } = await supabase
+                    .from('Feedback')
+                    .select(`
+                        *,
+                        collaborator:Collaborator!collaboratorId(id, name, photoUrl, role:Role(name)),
+                        coordinator:User!coordinatorId(name)
+                    `)
+                    .in('coordinatorId', coordinatorIds)
+                    .order('date', { ascending: false });
+                feedbacks = data || [];
+            }
         }
 
         return NextResponse.json(feedbacks);
@@ -62,25 +56,31 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR")
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
         const data = await req.json();
         const parsed = FeedbackSchema.parse(data);
 
-        const feedback = await prisma.feedback.create({
-            data: {
-                date: new Date(parsed.date),
+        const { data: feedback, error } = await supabase
+            .from('Feedback')
+            .insert({
+                date: new Date(parsed.date).toISOString(),
                 content: parsed.content,
                 tag: parsed.tag,
                 type: parsed.type,
                 origin: parsed.origin,
                 collaboratorId: parsed.collaboratorId,
-                coordinatorId: session.user.id
-            }
-        });
+                coordinatorId: user.id
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
 
         return NextResponse.json(feedback, { status: 201 });
     } catch (error: unknown) {

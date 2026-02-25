@@ -2,7 +2,8 @@ import { z } from "zod";
 
 export const CollaboratorSchema = z.object({
     name: z.string().min(2, "Name must be at least 2 characters"),
-    email: z.string().email("Valid email required").optional(),
+    email: z.string().email("Valid email required").optional().nullable().or(z.literal("")),
+    matricula: z.string().optional().nullable().or(z.literal("")),
     address: z.string().min(5, "Address must be at least 5 characters").optional().nullable().or(z.literal("")),
     deliveryAddress: z.string().min(5, "Delivery address must be at least 5 characters").optional().nullable().or(z.literal("")),
     photoUrl: z.string().optional().nullable(),

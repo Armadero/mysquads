@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { z } from "zod";
 
 const LinkRequestSchema = z.object({
@@ -14,20 +12,26 @@ const LinkUpdateSchema = z.object({
 });
 
 export async function POST(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "MANAGER")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "MANAGER")
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
         const data = await req.json();
         const parsed = LinkRequestSchema.parse(data);
 
-        const link = await prisma.managerCoordinatorLink.create({
-            data: {
-                managerId: session.user.id,
+        const { data: link, error } = await supabase
+            .from('ManagerCoordinatorLink')
+            .insert({
+                managerId: user.id,
                 coordinatorId: parsed.coordinatorId
-            }
-        });
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
 
         return NextResponse.json(link, { status: 201 });
     } catch (error: unknown) {
@@ -39,37 +43,55 @@ export async function POST(req: Request) {
 }
 
 export async function GET() {
-    const session = await getServerSession(authOptions);
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
 
-    if (session.user.type === "MANAGER") {
-        const links = await prisma.managerCoordinatorLink.findMany({
-            where: { managerId: session.user.id },
-            include: { coordinator: { select: { id: true, name: true, email: true } } }
-        });
-        return NextResponse.json(links);
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    if (user.user_metadata?.type === "MANAGER") {
+        const { data: links } = await supabase
+            .from('ManagerCoordinatorLink')
+            .select(`
+                *,
+                coordinator:User!coordinatorId(id, name, email)
+            `)
+            .eq('managerId', user.id);
+
+        return NextResponse.json(links || []);
     } else {
-        const links = await prisma.managerCoordinatorLink.findMany({
-            where: { coordinatorId: session.user.id, status: "PENDING" },
-            include: { manager: { select: { id: true, name: true, email: true } } }
-        });
-        return NextResponse.json(links);
+        const { data: links } = await supabase
+            .from('ManagerCoordinatorLink')
+            .select(`
+                *,
+                manager:User!managerId(id, name, email)
+            `)
+            .eq('coordinatorId', user.id)
+            .eq('status', 'PENDING');
+
+        return NextResponse.json(links || []);
     }
 }
 
 export async function PUT(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR")
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
         const data = await req.json();
         const parsed = LinkUpdateSchema.parse(data);
 
-        const link = await prisma.managerCoordinatorLink.update({
-            where: { id: parsed.id, coordinatorId: session.user.id },
-            data: { status: parsed.status }
-        });
+        const { data: link, error } = await supabase
+            .from('ManagerCoordinatorLink')
+            .update({ status: parsed.status })
+            .eq('id', parsed.id)
+            .eq('coordinatorId', user.id)
+            .select()
+            .single();
+
+        if (error) throw error;
 
         return NextResponse.json(link);
     } catch (error: unknown) {

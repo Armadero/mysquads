@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { MessageSquare, Plus, History, CheckCircle, Clock, AlertCircle, X, Search, Pencil, Trash2, Calendar, User, Tag, ArrowRight, UserPlus, ChevronDown, Filter, Eye } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 const FEEDBACK_TYPES = {
     POSITIVE: { label: "Positivo", color: "bg-green-50 text-green-700 border-green-100 dark:bg-green-900/20 dark:text-green-400" },
@@ -17,7 +17,8 @@ const ORIGINS = {
 };
 
 export default function FeedbackPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [feedbacks, setFeedbacks] = useState<any[]>([]);
     const [collaborators, setCollaborators] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
@@ -35,15 +36,23 @@ export default function FeedbackPage() {
     const [type, setType] = useState<keyof typeof FEEDBACK_TYPES>("NEUTRAL");
     const [origin, setOrigin] = useState<keyof typeof ORIGINS>("PERIODIC");
 
-    const isManager = (session?.user as any)?.type === "MANAGER";
-    const isCoordinator = (session?.user as any)?.type === "COORDINATOR";
+    const isManager = user?.user_metadata?.type === "MANAGER";
+    const isCoordinator = user?.user_metadata?.type === "COORDINATOR";
 
     useEffect(() => {
-        if (session) {
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (user) {
             fetchFeedbacks();
             if (isCoordinator) fetchCollaborators();
         }
-    }, [session, isCoordinator]);
+    }, [user, isCoordinator]);
 
     const fetchFeedbacks = async () => {
         const res = await fetch("/api/feedback");
@@ -111,7 +120,7 @@ export default function FeedbackPage() {
         setOrigin("PERIODIC");
     };
 
-    if (!session?.user || (!isCoordinator && !isManager)) return null;
+    if (!user || (!isCoordinator && !isManager)) return null;
 
     const INPUT = "w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all";
     const LABEL = "block text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1.5";

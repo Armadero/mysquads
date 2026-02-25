@@ -1,10 +1,11 @@
 "use client";
 import { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { Calendar, Plus, History, CheckCircle, Clock, AlertCircle, X, ChevronRight, Activity, UserPlus, Users, Search, UserMinus, Pencil, Trash2 } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function EventsPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [events, setEvents] = useState<any[]>([]);
     const [collaborators, setCollaborators] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
@@ -18,11 +19,19 @@ export default function EventsPage() {
     const [searchQuery, setSearchQuery] = useState("");
 
     useEffect(() => {
-        if (session) {
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (user) {
             fetchEvents();
             fetchCollaborators();
         }
-    }, [session]);
+    }, [user]);
 
     const fetchEvents = async () => {
         const res = await fetch("/api/events");
@@ -96,7 +105,7 @@ export default function EventsPage() {
         );
     };
 
-    if (!session?.user || (session.user as any).type !== "COORDINATOR") return null;
+    if (!user || user.user_metadata?.type !== "COORDINATOR") return null;
 
     // Filter newcomers (no previous integration events)
     // When editing, we also include collaborators ALREADY in that event

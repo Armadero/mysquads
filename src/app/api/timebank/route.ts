@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 
 // Next.js Turbopack edge polyfills for pdf.js / pdf-parse
 if (typeof globalThis.DOMMatrix === 'undefined') {
@@ -18,22 +16,34 @@ const pdfParse = require("pdf-parse/lib/pdf-parse.js");
 import { parse, isValid } from "date-fns";
 
 export async function GET() {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR")
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const entries = await prisma.timeBankEntry.findMany({
-        where: { collaborator: { coordinatorId: session.user.id } },
-        include: { collaborator: { select: { id: true, name: true } } },
-        orderBy: { expirationDate: "asc" }
-    });
+    const { data: entries, error } = await supabase
+        .from('TimeBankEntry')
+        .select(`
+            *,
+            collaborator:Collaborator!inner(id, name, coordinatorId)
+        `)
+        .eq('collaborator.coordinatorId', user.id)
+        .order('expirationDate', { ascending: true });
 
-    return NextResponse.json(entries);
+    if (error) {
+        console.error("Error fetching timebank entries", error);
+        return NextResponse.json({ error: "Failed to fetch entries" }, { status: 500 });
+    }
+
+    return NextResponse.json(entries || []);
 }
 
 export async function POST(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR") {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -103,21 +113,26 @@ export async function POST(req: Request) {
         }
 
         // Fetch all active collaborators for this coordinator
-        const activeCollaborators = await prisma.collaborator.findMany({
-            where: { coordinatorId: session.user.id },
-            select: { id: true, name: true }
-        });
+        const { data: activeCollaborators } = await supabase
+            .from('Collaborator')
+            .select('id, name')
+            .eq('coordinatorId', user.id);
+
+        const collabIds = activeCollaborators?.map(c => c.id) || [];
 
         // Delete previous entries entirely so the document acts as a fresh truth snapshot
-        await prisma.timeBankEntry.deleteMany({
-            where: { collaborator: { coordinatorId: session.user.id } }
-        });
+        if (collabIds.length > 0) {
+            await supabase
+                .from('TimeBankEntry')
+                .delete()
+                .in('collaboratorId', collabIds);
+        }
 
         const newEntries = [];
 
         for (const entry of parsedEntries) {
             // Fuzzy search exact or case-insensitive match for the name
-            const matchingCollab = activeCollaborators.find(
+            const matchingCollab = activeCollaborators?.find(
                 col => col.name.trim().toLowerCase() === entry.collabName.trim().toLowerCase() ||
                     col.name.trim().toLowerCase().includes(entry.collabName.trim().toLowerCase()) ||
                     entry.collabName.trim().toLowerCase().includes(col.name.trim().toLowerCase())
@@ -126,17 +141,17 @@ export async function POST(req: Request) {
             if (matchingCollab) {
                 newEntries.push({
                     collaboratorId: matchingCollab.id,
-                    date: entry.date,
-                    expirationDate: entry.expiration,
+                    date: entry.date.toISOString(),
+                    expirationDate: entry.expiration.toISOString(),
                     balanceHours: entry.balance
                 });
             }
         }
 
         if (newEntries.length > 0) {
-            await prisma.timeBankEntry.createMany({
-                data: newEntries
-            });
+            await supabase
+                .from('TimeBankEntry')
+                .insert(newEntries);
         }
 
         return NextResponse.json({

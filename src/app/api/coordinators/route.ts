@@ -1,27 +1,32 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 
 export async function GET(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "MANAGER") {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "MANAGER") {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { searchParams } = new URL(req.url);
     const search = searchParams.get('q') || '';
 
-    const coordinators = await prisma.user.findMany({
-        where: {
-            type: "COORDINATOR",
-            OR: [
-                { name: { contains: search } },
-                { email: { contains: search } }
-            ]
-        },
-        select: { id: true, name: true, email: true }
-    });
+    let query = supabase
+        .from("User")
+        .select("id, name, email")
+        .eq("type", "COORDINATOR");
 
-    return NextResponse.json(coordinators);
+    if (search) {
+        query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+    }
+
+    const { data: coordinators, error } = await query;
+
+    if (error) {
+        console.error("[GET /api/coordinators]", error);
+        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    }
+
+    return NextResponse.json(coordinators || []);
 }

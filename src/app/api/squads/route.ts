@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { z } from "zod";
 
 const SquadSchema = z.object({
@@ -13,19 +11,26 @@ const SquadSchema = z.object({
 });
 
 export async function GET() {
-    const session = await getServerSession(authOptions);
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     let coordinatorIds: string[] = [];
+    const type = user.user_metadata?.type;
 
-    if (session.user.type === "COORDINATOR") {
-        coordinatorIds = [session.user.id];
-    } else if (session.user.type === "MANAGER") {
-        const links = await prisma.managerCoordinatorLink.findMany({
-            where: { managerId: session.user.id, status: "APPROVED" },
-            select: { coordinatorId: true }
-        });
-        coordinatorIds = links.map(link => link.coordinatorId);
+    if (type === "COORDINATOR") {
+        coordinatorIds = [user.id];
+    } else if (type === "MANAGER") {
+        const { data: links } = await supabase
+            .from("ManagerCoordinatorLink")
+            .select("coordinatorId")
+            .eq("managerId", user.id)
+            .eq("status", "APPROVED");
+
+        if (links) {
+            coordinatorIds = links.map(link => link.coordinatorId);
+        }
     } else {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -34,47 +39,63 @@ export async function GET() {
         return NextResponse.json([]);
     }
 
-    const squads = await prisma.squad.findMany({
-        where: { coordinatorId: { in: coordinatorIds } },
-        include: {
-            collaborators: {
-                include: { collaborator: { include: { role: true } } }
-            }
-        }
-    });
+    const { data: squads, error } = await supabase
+        .from("Squad")
+        .select(`
+      *,
+      collaborators:SquadCollaborator(
+        collaborator:Collaborator(
+          *,
+          role:Role(*)
+        )
+      )
+    `)
+        .in("coordinatorId", coordinatorIds);
 
-    const flattened = squads.map((s) => ({
+    if (error) {
+        console.error("[GET /api/squads]", error);
+        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    }
+
+    const flattened = (squads || []).map((s: any) => ({
         ...s,
-        collaborators: s.collaborators.map((c) => ({ ...c.collaborator }))
+        collaborators: (s.collaborators || []).map((c: any) => ({ ...c.collaborator }))
     }));
 
     return NextResponse.json(flattened);
 }
 
 export async function POST(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     try {
         const data = await req.json();
         const parsed = SquadSchema.parse(data);
 
-        const squad = await prisma.squad.create({
-            data: {
+        const { data: squad, error } = await supabase
+            .from("Squad")
+            .insert({
                 name: parsed.name,
                 jiraLink: parsed.jiraLink || null,
                 confluenceLink: parsed.confluenceLink || null,
-                sprintStart: parsed.sprintStart ? new Date(parsed.sprintStart) : null,
+                sprintStart: parsed.sprintStart ? new Date(parsed.sprintStart).toISOString() : null,
                 sprintDays: parsed.sprintDays,
-                coordinatorId: session.user.id
-            }
-        });
+                coordinatorId: user.id
+            })
+            .select()
+            .single();
 
+        if (error) throw error;
         return NextResponse.json(squad, { status: 201 });
-    } catch (error: unknown) {
-        if (error instanceof z.ZodError)
+    } catch (error: any) {
+        if (error instanceof z.ZodError) {
             return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
+        }
         console.error("[POST /api/squads]", error);
         return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
     }

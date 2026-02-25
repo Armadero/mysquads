@@ -2,8 +2,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { signIn } from "next-auth/react";
 import { User, Mail, Lock, Loader2, ShieldCheck } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function RegisterPage() {
     const router = useRouter();
@@ -13,6 +13,7 @@ export default function RegisterPage() {
     const [type, setType] = useState("COORDINATOR");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
+    const supabase = createClient();
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -20,29 +21,24 @@ export default function RegisterPage() {
         setError("");
 
         try {
-            const res = await fetch("/api/register", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email, password, name, type }),
-            });
-
-            if (!res.ok) {
-                const data = await res.json();
-                throw new Error(data.message || "Falha ao criar conta");
-            }
-
-            const loginRes = await signIn("credentials", {
+            const { data, error } = await supabase.auth.signUp({
                 email,
                 password,
-                redirect: false,
+                options: {
+                    data: {
+                        name,
+                        type,
+                    }
+                }
             });
 
-            if (loginRes?.error) {
-                setError("Conta criada, mas houve um erro no acesso automático.");
-                setLoading(false);
-            } else {
-                router.push("/dashboard");
+            if (error) {
+                throw new Error(error.message || "Falha ao criar conta");
             }
+
+            // Supabase Auth Automatically logs them in if email confirmations are disabled.
+            router.push("/dashboard");
+            router.refresh();
         } catch (err: any) {
             setError(err.message);
             setLoading(false);
@@ -73,7 +69,7 @@ export default function RegisterPage() {
                             <div className="relative">
                                 <User className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={18} />
                                 <input
-                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-zinc-900 dark:text-white"
                                     type="text"
                                     placeholder="Como quer ser chamado?"
                                     value={name}
@@ -88,7 +84,7 @@ export default function RegisterPage() {
                             <div className="relative">
                                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={18} />
                                 <input
-                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-zinc-900 dark:text-white"
                                     type="email"
                                     placeholder="seu@trabalho.com"
                                     value={email}
@@ -103,7 +99,7 @@ export default function RegisterPage() {
                             <div className="relative">
                                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={18} />
                                 <input
-                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-zinc-900 dark:text-white"
                                     type="password"
                                     placeholder="Crie uma senha forte"
                                     value={password}
@@ -118,7 +114,7 @@ export default function RegisterPage() {
                             <div className="relative">
                                 <ShieldCheck className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={18} />
                                 <select
-                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 appearance-none transition-all cursor-pointer"
+                                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 appearance-none transition-all cursor-pointer text-zinc-900 dark:text-white"
                                     value={type}
                                     onChange={e => setType(e.target.value)}
                                 >

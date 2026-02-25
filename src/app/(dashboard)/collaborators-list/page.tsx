@@ -1,11 +1,12 @@
 "use client";
-import { useSession } from "next-auth/react";
 import { useState, useEffect, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { ChevronLeft, Users, Gift, Cake, AlertTriangle, MoreHorizontal, Download, Mail, Bell } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 function CollaboratorsListContent() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const searchParams = useSearchParams();
     const router = useRouter();
     const type = searchParams.get("type");
@@ -13,10 +14,18 @@ function CollaboratorsListContent() {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (session && type) {
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (user && type) {
             fetchListData();
         }
-    }, [session, type]);
+    }, [user, type]);
 
     const fetchListData = async () => {
         setLoading(true);

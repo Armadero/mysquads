@@ -1,49 +1,80 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { EventSchema } from "@/lib/schemas";
+import { z } from "zod";
 
 export async function GET(_req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
 
-    const events = await prisma.integrationEvent.findMany({
-        where: { coordinatorId: session.user.id },
-        include: {
-            collaborators: { include: { collaborator: true } }
-        },
-        orderBy: { startDate: "desc" }
-    });
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-    return NextResponse.json(events);
+    const { data: events, error } = await supabase
+        .from("IntegrationEvent")
+        .select(`
+      *,
+      collaborators:IntegrationEventCollaborator(
+        collaborator:Collaborator(*)
+      )
+    `)
+        .eq("coordinatorId", user.id)
+        .order("startDate", { ascending: false });
+
+    if (error) {
+        console.error("[GET /api/events]", error);
+        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    }
+
+    return NextResponse.json(events || []);
 }
 
 export async function POST(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     try {
         const data = await req.json();
         const parsed = EventSchema.parse(data);
 
-        const event = await prisma.integrationEvent.create({
-            data: {
-                startDate: new Date(parsed.startDate),
-                endDate: new Date(parsed.endDate),
-                coordinatorId: session.user.id,
-                collaborators: {
-                    create: parsed.collaboratorIds.map((id: string) => ({ collaboratorId: id }))
-                }
-            }
-        });
+        // 1. Create the event
+        const { data: event, error: eventError } = await supabase
+            .from("IntegrationEvent")
+            .insert({
+                startDate: new Date(parsed.startDate).toISOString(),
+                endDate: new Date(parsed.endDate).toISOString(),
+                coordinatorId: user.id,
+            })
+            .select()
+            .single();
+
+        if (eventError) throw eventError;
+
+        // 2. Attach the collaborators directly
+        if (parsed.collaboratorIds && parsed.collaboratorIds.length > 0) {
+            const inserts = parsed.collaboratorIds.map((id: string) => ({
+                eventId: event.id,
+                collaboratorId: id
+            }));
+
+            const { error: attachError } = await supabase
+                .from("IntegrationEventCollaborator")
+                .insert(inserts);
+
+            if (attachError) throw attachError;
+        }
 
         return NextResponse.json(event);
     } catch (error: any) {
-        if (error.name === "ZodError") {
+        if (error instanceof z.ZodError) {
             return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
         }
-        console.error(error);
+        console.error("[POST /api/events]", error);
         return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
     }
 }

@@ -1,19 +1,28 @@
 "use client";
-import { useSession } from "next-auth/react";
 import { useState, useEffect } from "react";
 import { Search, ArrowRight, ShieldCheck } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function ConnectionsPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [links, setLinks] = useState<{ id: string; status: string; coordinator?: { name: string; email: string } }[]>([]);
     const [search, setSearch] = useState("");
     const [coordinators, setCoordinators] = useState<{ id: string; name: string; email: string }[]>([]);
     const [requestFeedback, setRequestFeedback] = useState<{ id: string; success: boolean; message: string } | null>(null);
 
     useEffect(() => {
-        if (!session || session.user.type !== "MANAGER") return;
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (!user || user.user_metadata?.type !== "MANAGER") return;
         fetchLinks();
-    }, [session]);
+    }, [user]);
 
     const fetchLinks = async () => {
         const res = await fetch("/api/links");
@@ -42,7 +51,7 @@ export default function ConnectionsPage() {
         }
     };
 
-    if (!session || session.user.type !== "MANAGER") return null;
+    if (!user || user.user_metadata?.type !== "MANAGER") return null;
 
     const pendingConnections = links.filter(link => link.status !== 'APPROVED');
     const activeConnections = links.filter(link => link.status === 'APPROVED');

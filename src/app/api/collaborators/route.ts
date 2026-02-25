@@ -1,24 +1,24 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { CollaboratorSchema } from "@/lib/schemas";
 import { z } from "zod";
 
 export async function GET() {
-    const session = await getServerSession(authOptions);
-    if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     let coordinatorIds: string[] = [];
 
-    if (session.user.type === "COORDINATOR") {
-        coordinatorIds = [session.user.id];
-    } else if (session.user.type === "MANAGER") {
-        const links = await prisma.managerCoordinatorLink.findMany({
-            where: { managerId: session.user.id, status: "APPROVED" },
-            select: { coordinatorId: true }
-        });
-        coordinatorIds = links.map(link => link.coordinatorId);
+    if (user.user_metadata?.type === "COORDINATOR") {
+        coordinatorIds = [user.id];
+    } else if (user.user_metadata?.type === "MANAGER") {
+        const { data: links } = await supabase
+            .from('ManagerCoordinatorLink')
+            .select('coordinatorId')
+            .eq('managerId', user.id)
+            .eq('status', 'APPROVED');
+        coordinatorIds = links?.map((link: any) => link.coordinatorId) || [];
     } else {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -27,42 +27,57 @@ export async function GET() {
         return NextResponse.json([]);
     }
 
-    const collabs = await prisma.collaborator.findMany({
-        where: { coordinatorId: { in: coordinatorIds } },
-        include: {
-            role: { select: { id: true, name: true, defaultColor: true } },
-            squads: { select: { squadId: true } },
-            events: { select: { eventId: true } }
-        }
-    });
+    const { data: collabs } = await supabase
+        .from('Collaborator')
+        .select(`
+            *,
+            role:Role(id, name, defaultColor),
+            squads:SquadMember(squadId),
+            events:CollaboratorEvent(eventId)
+        `)
+        .in('coordinatorId', coordinatorIds);
 
-    return NextResponse.json(collabs);
+    return NextResponse.json(collabs || []);
 }
 
 export async function POST(req: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR")
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
         const data = await req.json();
         const parsed = CollaboratorSchema.parse(data);
-        const { email: collabEmail, roleId, ...rest } = parsed;
+        const { email: collabEmail, roleId, matricula, ...rest } = parsed;
 
-        const collab = await prisma.collaborator.create({
-            data: {
-                ...rest,
-                email: collabEmail ?? null,
-                coordinatorId: session.user.id,
-                admissionDate: new Date(parsed.admissionDate),
-                birthDate: parsed.birthDate ? new Date(parsed.birthDate) : null,
-                resignationDate: parsed.resignationDate ? new Date(parsed.resignationDate) : null,
-                roleId: roleId as string
+        const insertData = {
+            ...rest,
+            email: collabEmail ?? null,
+            matricula: matricula || null,
+            coordinatorId: user.id,
+            admissionDate: new Date(parsed.admissionDate).toISOString(),
+            birthDate: parsed.birthDate ? new Date(parsed.birthDate).toISOString() : null,
+            resignationDate: parsed.resignationDate ? new Date(parsed.resignationDate).toISOString() : null,
+            roleId: roleId as string
+        };
+
+        const { data: collab, error } = await supabase
+            .from('Collaborator')
+            .insert(insertData)
+            .select()
+            .single();
+
+        if (error) {
+            if (error.code === '23505' && error.message.includes('matricula')) {
+                return NextResponse.json({ error: "Esta matrícula já está em uso por outro colaborador." }, { status: 400 });
             }
-        });
+            throw error;
+        }
 
         return NextResponse.json(collab, { status: 201 });
-    } catch (error: unknown) {
+    } catch (error: any) {
         if (error instanceof z.ZodError)
             return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
         console.error("[POST /api/collaborators]", error);

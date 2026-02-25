@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { FeedbackSchema } from "@/lib/schemas";
 import { z } from "zod";
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR")
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
@@ -15,17 +15,22 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
         const data = await req.json();
         const parsed = FeedbackSchema.parse(data);
 
-        const feedback = await prisma.feedback.update({
-            where: { id, coordinatorId: session.user.id },
-            data: {
-                date: new Date(parsed.date),
+        const { data: feedback, error } = await supabase
+            .from('Feedback')
+            .update({
+                date: new Date(parsed.date).toISOString(),
                 content: parsed.content,
                 tag: parsed.tag,
                 type: parsed.type,
                 origin: parsed.origin,
                 collaboratorId: parsed.collaboratorId
-            }
-        });
+            })
+            .eq('id', id)
+            .eq('coordinatorId', user.id)
+            .select()
+            .single();
+
+        if (error) throw error;
 
         return NextResponse.json(feedback);
     } catch (error: unknown) {
@@ -37,15 +42,21 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 }
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR")
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     try {
         const { id } = await params;
-        await prisma.feedback.delete({
-            where: { id, coordinatorId: session.user.id }
-        });
+        const { error } = await supabase
+            .from('Feedback')
+            .delete()
+            .eq('id', id)
+            .eq('coordinatorId', user.id);
+
+        if (error) throw error;
 
         return NextResponse.json({ success: true });
     } catch (error: unknown) {

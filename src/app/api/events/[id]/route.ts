@@ -1,64 +1,84 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { createClient } from "@/lib/supabase/server";
 import { EventSchema } from "@/lib/schemas";
 import { z } from "zod";
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const { id } = await params;
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     try {
-        const { id } = await params;
         const data = await req.json();
         const parsed = EventSchema.parse(data);
 
-        // Update basic info and sync collaborators atomically
-        await prisma.$transaction([
-            prisma.integrationEvent.update({
-                where: { id, coordinatorId: session.user.id },
-                data: {
-                    startDate: new Date(parsed.startDate),
-                    endDate: new Date(parsed.endDate),
-                }
-            }),
-            prisma.integrationEventCollaborator.deleteMany({
-                where: { eventId: id }
-            }),
-            prisma.integrationEventCollaborator.createMany({
-                data: parsed.collaboratorIds.map((collabId: string) => ({
-                    eventId: id,
-                    collaboratorId: collabId
-                }))
+        // Update basic info
+        const { error: eventError } = await supabase
+            .from("IntegrationEvent")
+            .update({
+                startDate: new Date(parsed.startDate).toISOString(),
+                endDate: new Date(parsed.endDate).toISOString(),
             })
-        ]);
+            .eq("id", id)
+            .eq("coordinatorId", user.id); // Security: must be owner
+
+        if (eventError) throw eventError;
+
+        // Sync collaborators
+        const { error: deleteError } = await supabase
+            .from("IntegrationEventCollaborator")
+            .delete()
+            .eq("eventId", id);
+
+        if (deleteError) throw deleteError;
+
+        if (parsed.collaboratorIds.length > 0) {
+            const inserts = parsed.collaboratorIds.map((collabId: string) => ({
+                eventId: id,
+                collaboratorId: collabId
+            }));
+
+            const { error: insertError } = await supabase
+                .from("IntegrationEventCollaborator")
+                .insert(inserts);
+
+            if (insertError) throw insertError;
+        }
 
         return NextResponse.json({ success: true });
-    } catch (error: unknown) {
-        if (error instanceof z.ZodError)
+    } catch (error: any) {
+        if (error instanceof z.ZodError) {
             return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
+        }
         console.error("[PUT /api/events/:id]", error);
         return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
     }
 }
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const session = await getServerSession(authOptions);
-    if (!session || session.user.type !== "COORDINATOR")
+    const { id } = await params;
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user || user.user_metadata?.type !== "COORDINATOR") {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     try {
-        const { id } = await params;
+        // If ON DELETE CASCADE is set in Supabase, this single call is enough.
+        const { error } = await supabase
+            .from("IntegrationEvent")
+            .delete()
+            .eq("id", id)
+            .eq("coordinatorId", user.id);
 
-        await prisma.$transaction([
-            prisma.integrationEventCollaborator.deleteMany({ where: { eventId: id } }),
-            prisma.integrationEvent.delete({ where: { id, coordinatorId: session.user.id } })
-        ]);
-
+        if (error) throw error;
         return NextResponse.json({ success: true });
-    } catch (error: unknown) {
+    } catch (error: any) {
         console.error("[DELETE /api/events/:id]", error);
         return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
     }

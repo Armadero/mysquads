@@ -1,18 +1,28 @@
 "use client";
 import { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { Clock, Upload, AlertTriangle, CheckCircle, FileText, X, Search, Info, ArrowUpRight } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function TimebankPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [alerts, setAlerts] = useState<any[]>([]);
     const [file, setFile] = useState<File | null>(null);
     const [loading, setLoading] = useState(false);
-    const [success, setSuccess] = useState(false);
+    const [success, setSuccess] = useState<string | false>(false);
+    const [errorMsg, setErrorMsg] = useState<string | false>(false);
 
     useEffect(() => {
-        if (session) fetchAlerts();
-    }, [session]);
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (user) fetchAlerts();
+    }, [user]);
 
     const fetchAlerts = async () => {
         const res = await fetch("/api/timebank");
@@ -24,6 +34,8 @@ export default function TimebankPage() {
         if (!file) return;
 
         setLoading(true);
+        setErrorMsg(false);
+        setSuccess(false);
         const formData = new FormData();
         formData.append("file", file);
 
@@ -32,18 +44,21 @@ export default function TimebankPage() {
             body: formData,
         });
 
+        const data = await res.json();
+
         if (res.ok) {
-            setSuccess(true);
+            setSuccess(data.message || "Importado com sucesso!");
             setFile(null);
             fetchAlerts();
-            setTimeout(() => setSuccess(false), 3000);
+            setTimeout(() => setSuccess(false), 5000);
         } else {
-            alert("Erro ao processar PDF");
+            setErrorMsg(data.error || "Erro ao processar PDF");
+            setTimeout(() => setErrorMsg(false), 5000);
         }
         setLoading(false);
     };
 
-    if (!session?.user || (session.user as any).type !== "COORDINATOR") return null;
+    if (!user || user.user_metadata?.type !== "COORDINATOR") return null;
 
     return (
         <div className="space-y-10 animate-in fade-in duration-500 pb-20 font-sans">
@@ -53,6 +68,7 @@ export default function TimebankPage() {
                     <p className="text-sm text-zinc-500 dark:text-zinc-400">Monitore saldos críticos e importe novos relatórios mensais.</p>
                 </div>
             </div>
+
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 {/* Left: Alerts */}
@@ -126,9 +142,18 @@ export default function TimebankPage() {
 
                     <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 shadow-sm p-6 overflow-hidden relative">
                         {success && (
-                            <div className="absolute inset-0 bg-green-600 text-white flex flex-col items-center justify-center z-10 animate-in fade-in duration-300">
+                            <div className="absolute inset-0 bg-green-600 text-white flex flex-col items-center justify-center z-10 animate-in fade-in duration-300 px-6 text-center">
                                 <CheckCircle size={48} className="mb-2" />
-                                <span className="font-bold uppercase tracking-widest text-xs">Importado com sucesso!</span>
+                                <span className="font-bold uppercase tracking-widest text-xs mb-1">Importação Concluída</span>
+                                <span className="text-xs text-green-100">{success}</span>
+                            </div>
+                        )}
+
+                        {errorMsg && (
+                            <div className="absolute inset-0 bg-red-600 text-white flex flex-col items-center justify-center z-10 animate-in fade-in duration-300 px-6 text-center">
+                                <X size={48} className="mb-2" />
+                                <span className="font-bold uppercase tracking-widest text-xs mb-1">Falha na Extração</span>
+                                <span className="text-xs text-red-100">{errorMsg}</span>
                             </div>
                         )}
 

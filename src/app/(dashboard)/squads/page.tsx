@@ -1,11 +1,12 @@
 "use client";
 import React, { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import { Plus, Trash2, Users, Layout, GripVertical, ChevronRight, X, UserMinus, Monitor, ArrowLeft } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
 export default function SquadsPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [squads, setSquads] = useState<any[]>([]);
     const [collaborators, setCollaborators] = useState<any[]>([]);
     const [isCreating, setIsCreating] = useState(false);
@@ -13,12 +14,31 @@ export default function SquadsPage() {
     const [view, setView] = useState<'LIST' | 'EDIT'>('LIST');
     const [selectedSquadId, setSelectedSquadId] = useState<string | null>(null);
 
+    const roleTypeLabels: Record<string, string> = {
+        SCRUM_MASTER: "Scrum Master",
+        SYSTEM_ANALYST: "Analista de Sistemas",
+        PRODUCT_OWNER: "Product Owner",
+        DEVELOPER: "Desenvolvedor",
+        QA_ANALYST: "Analista de Teste",
+        SPECIALIST: "Especialista",
+        BUSINESS_ANALYST: "Analista de Negócios",
+        PRODUCT_MANAGER: "Product Manager"
+    };
+
     useEffect(() => {
-        if (session) {
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (user) {
             fetchSquads();
             fetchCollaborators();
         }
-    }, [session]);
+    }, [user]);
 
     const fetchSquads = async () => {
         const res = await fetch("/api/squads", { cache: "no-store" });
@@ -112,8 +132,8 @@ export default function SquadsPage() {
         }
     };
 
-    if (!session?.user) return null;
-    const isCoordinator = (session.user as any).type === "COORDINATOR";
+    if (!user) return null;
+    const isCoordinator = user.user_metadata?.type === "COORDINATOR";
 
     // Derived state for the lists
     const selectedSquad = squads.find(s => s.id === selectedSquadId);
@@ -205,7 +225,7 @@ export default function SquadsPage() {
                                                         .map((c: any) => (
                                                             <div
                                                                 key={c.id}
-                                                                title={`${c.name} (${c.role?.name || 'Membro'})`}
+                                                                title={`${c.name} (${c.role ? roleTypeLabels[c.role.name as string] || c.role.name : 'Membro'})`}
                                                                 className="w-7 h-7 rounded-full border-2 border-white dark:border-zinc-900 bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-[10px] font-black text-zinc-500 uppercase shadow-sm overflow-hidden"
                                                                 style={{ borderColor: c.role?.defaultColor ? `${c.role.defaultColor}40` : undefined }}
                                                             >
@@ -342,7 +362,7 @@ export default function SquadsPage() {
                                                             <div className="flex items-center gap-2 border-b border-zinc-50 dark:border-zinc-800 pb-2">
                                                                 <div className="w-1 h-3 rounded-full" style={{ backgroundColor: role?.defaultColor || "#CBD5E1" }}></div>
                                                                 <h4 className="text-[9px] font-black uppercase tracking-widest text-zinc-400">
-                                                                    {role?.name || "Sem Cargo"} • {roleMembers.length}
+                                                                    {role ? roleTypeLabels[role.name as string] || role.name : "Sem Cargo"} • {roleMembers.length}
                                                                 </h4>
                                                             </div>
                                                             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -376,6 +396,17 @@ export default function SquadsPage() {
 }
 
 function DraggableItem({ collab, index, isDragDisabled }: { collab: any, index: number, isDragDisabled?: boolean }) {
+    const roleTypeLabels: Record<string, string> = {
+        SCRUM_MASTER: "Scrum Master",
+        SYSTEM_ANALYST: "Analista de Sistemas",
+        PRODUCT_OWNER: "Product Owner",
+        DEVELOPER: "Desenvolvedor",
+        QA_ANALYST: "Analista de Teste",
+        SPECIALIST: "Especialista",
+        BUSINESS_ANALYST: "Analista de Negócios",
+        PRODUCT_MANAGER: "Product Manager"
+    };
+
     return (
         <Draggable draggableId={collab.id} index={index} isDragDisabled={isDragDisabled}>
             {(provided, snapshot) => (
@@ -404,7 +435,7 @@ function DraggableItem({ collab, index, isDragDisabled }: { collab: any, index: 
                             <div className="font-bold text-sm text-zinc-800 dark:text-zinc-200 truncate">{collab.name}</div>
                             <div className="flex items-center gap-1.5 mt-0.5">
                                 <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: collab.role?.defaultColor || "#CBD5E1" }}></div>
-                                <span className="text-[10px] font-bold text-zinc-500 uppercase truncate">{collab.role?.name || "Colaborador"}</span>
+                                <span className="text-[10px] font-bold text-zinc-500 uppercase truncate">{collab.role ? roleTypeLabels[collab.role.name as string] || collab.role.name : "Colaborador"}</span>
                             </div>
                         </div>
                     </div>

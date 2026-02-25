@@ -1,9 +1,9 @@
 "use client";
-import { signOut, useSession } from "next-auth/react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { LogOut, Users, Settings, Building, LayoutDashboard, Calendar, Clock, Menu, X, ChevronRight, MessageSquare, Link2 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 const navItems = [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -28,10 +28,38 @@ const pageTitles: Record<string, string> = {
 };
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-    const { data: session } = useSession();
     const pathname = usePathname();
+    const router = useRouter();
+    const supabase = createClient();
     const [mobileOpen, setMobileOpen] = useState(false);
-    const isCoordinator = session?.user?.type === "COORDINATOR";
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [user, setUser] = useState<any>(null);
+
+    useEffect(() => {
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) {
+                router.push('/login');
+                return;
+            }
+            setUser({
+                id: user.id,
+                email: user.email,
+                name: user.user_metadata?.name,
+                type: user.user_metadata?.type || 'COORDINATOR'
+            });
+        };
+        fetchUser();
+    }, [router, supabase.auth]);
+
+    const isCoordinator = user?.type === "COORDINATOR";
+
+    const handleSignOut = async () => {
+        await supabase.auth.signOut();
+        router.push("/login");
+        router.refresh();
+    };
 
     const NavContent = () => (
         <div className="flex flex-col h-full bg-white dark:bg-zinc-900">
@@ -72,21 +100,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
             {/* User & logout */}
             <div className="p-4 border-t border-zinc-200 dark:border-zinc-800 space-y-4">
-                {session?.user && (
+                {user && (
                     <div className="flex items-center gap-3 px-2">
                         <div className="w-8 h-8 rounded-full bg-zinc-200 dark:bg-zinc-700 flex items-center justify-center font-bold text-zinc-600 dark:text-zinc-300 text-xs">
-                            {session.user.name?.[0].toUpperCase()}
+                            {user.name?.[0]?.toUpperCase() || 'U'}
                         </div>
                         <div className="flex-1 min-w-0">
-                            <div className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">{session.user?.name || 'Usuário'}</div>
+                            <div className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 truncate">{user.name || user.email || 'Usuário'}</div>
                             <div className="text-[10px] text-zinc-500 font-bold uppercase truncate">
-                                {session.user?.type === "COORDINATOR" ? "Coordenador" : "Gerente"}
+                                {user.type === "COORDINATOR" ? "Coordenador" : "Gerente"}
                             </div>
                         </div>
                     </div>
                 )}
                 <button
-                    onClick={() => signOut({ callbackUrl: '/login' })}
+                    onClick={handleSignOut}
                     className="flex items-center gap-3 w-full px-3 py-2 text-sm text-zinc-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 rounded-md transition-colors"
                 >
                     <LogOut size={18} />

@@ -1,11 +1,22 @@
 "use client";
-import { useSession } from "next-auth/react";
 import { useState, useEffect } from "react";
 import { Search, CheckCircle, XCircle, Clock, Users, Gift, Cake, AlertTriangle, ArrowUpRight, ArrowRight } from "lucide-react";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
+const roleTypeLabels: Record<string, string> = {
+    SCRUM_MASTER: "Scrum Master",
+    SYSTEM_ANALYST: "Analista de Sistemas",
+    PRODUCT_OWNER: "Product Owner",
+    DEVELOPER: "Desenvolvedor",
+    QA_ANALYST: "Analista de Teste",
+    SPECIALIST: "Especialista",
+    BUSINESS_ANALYST: "Analista de Negócios",
+    PRODUCT_MANAGER: "Product Manager"
+};
 
 export default function DashboardPage() {
-    const { data: session } = useSession();
+    const supabase = createClient();
+    const [user, setUser] = useState<any>(null);
     const [links, setLinks] = useState<{ id: string; status: string; coordinator?: { name: string; email: string }; manager?: { name: string; email: string } }[]>([]);
     const [search, setSearch] = useState("");
     const [coordinators, setCoordinators] = useState<{ id: string; name: string; email: string }[]>([]);
@@ -13,11 +24,19 @@ export default function DashboardPage() {
     const [requestFeedback, setRequestFeedback] = useState<{ id: string; success: boolean; message: string } | null>(null);
 
     useEffect(() => {
-        if (!session) return;
+        const fetchUser = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            setUser(user);
+        };
+        fetchUser();
+    }, [supabase.auth]);
+
+    useEffect(() => {
+        if (!user) return;
         fetchLinks();
         fetchDashboard();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [session?.user?.id]);
+    }, [user?.id]);
 
     const fetchLinks = async () => {
         const res = await fetch("/api/links");
@@ -109,7 +128,7 @@ export default function DashboardPage() {
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl overflow-hidden shadow-sm flex flex-col">
                         <div className="p-4 border-b border-zinc-100 dark:border-zinc-800 flex justify-between items-center bg-zinc-50/50 dark:bg-zinc-800/30">
-                            <h3 className="font-bold text-xs uppercase tracking-wider text-zinc-500">Distribuição de Cargos</h3>
+                            <h3 className="font-bold text-xs uppercase tracking-wider text-zinc-500">Distribuição de Papéis</h3>
                             <span className="text-[10px] font-black bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full border border-blue-100">{metrics.totalCollaborators} Total</span>
                         </div>
                         <div className="p-4 flex-1">
@@ -118,12 +137,14 @@ export default function DashboardPage() {
                                     <li key={r.name} className="flex justify-between items-center group">
                                         <div className="flex items-center gap-2">
                                             <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
-                                            <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-zinc-100 transition-colors">{r.name}</span>
+                                            <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-zinc-100 transition-colors">
+                                                {roleTypeLabels[r.name] || r.name}
+                                            </span>
                                         </div>
                                         <span className="text-xs font-bold text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded-full">{r.count}</span>
                                     </li>
                                 ))}
-                                {metrics.roleDistribution.length === 0 && <li className="text-zinc-400 text-sm italic text-center py-4">Nenhum cargo registrado.</li>}
+                                {metrics.roleDistribution.length === 0 && <li className="text-zinc-400 text-sm italic text-center py-4">Nenhum papel registrado.</li>}
                             </ul>
                         </div>
                     </div>
@@ -181,15 +202,15 @@ export default function DashboardPage() {
         );
     };
 
-    if (!session?.user) return null;
+    if (!user) return null;
 
-    const isManager = session.user.type === "MANAGER";
+    const isManager = user.user_metadata?.type === "MANAGER";
 
     return (
         <div className="space-y-8 animate-in fade-in duration-500">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
-                    <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Olá, {session.user.name?.split(' ')[0] || 'usuário'} 👋</h1>
+                    <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Olá, {user.user_metadata?.name?.split(' ')[0] || 'usuário'} 👋</h1>
                     <p className="text-sm text-zinc-500 dark:text-zinc-400">Aqui está o resumo atual das suas equipes.</p>
                 </div>
                 {isManager && (
