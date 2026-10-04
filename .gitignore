@@ -53,3 +53,4 @@ dev.db-wal
 next-env.d.ts
 
 /src/generated/prisma
+.fuse_hidden*
