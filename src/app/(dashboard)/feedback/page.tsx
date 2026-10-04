@@ -1,7 +1,11 @@
 "use client";
-import { useState, useEffect } from "react";
-import { MessageSquare, Plus, History, CheckCircle, Clock, AlertCircle, X, Search, Pencil, Trash2, Calendar, User, Tag, ArrowRight, UserPlus, ChevronDown, Filter, Eye } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { useState, useEffect, useCallback } from "react";
+import { MessageSquare, Plus, Clock, AlertCircle, Search, Pencil, Trash2, Calendar, Tag, ChevronDown, Eye } from "lucide-react";
+import { FormModal } from "@/components/ui/form-modal";
+import { formatDate, describeApiError } from "@/lib/utils";
+import { useSession } from "@/lib/hooks/use-session";
+import { PageLoader, AccessDenied } from "@/components/ui/page-state";
+import { roleLabel } from "@/lib/labels";
 
 const FEEDBACK_TYPES = {
     POSITIVE: { label: "Positivo", color: "bg-green-50 text-green-700 border-green-100 dark:bg-green-900/20 dark:text-green-400" },
@@ -17,8 +21,7 @@ const ORIGINS = {
 };
 
 export default function FeedbackPage() {
-    const supabase = createClient();
-    const [user, setUser] = useState<any>(null);
+    const { user, loading: sessionLoading } = useSession();
     const [feedbacks, setFeedbacks] = useState<any[]>([]);
     const [collaborators, setCollaborators] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
@@ -36,33 +39,24 @@ export default function FeedbackPage() {
     const [type, setType] = useState<keyof typeof FEEDBACK_TYPES>("NEUTRAL");
     const [origin, setOrigin] = useState<keyof typeof ORIGINS>("PERIODIC");
 
-    const isManager = user?.user_metadata?.type === "MANAGER";
-    const isCoordinator = user?.user_metadata?.type === "COORDINATOR";
+    const isManager = user?.type === "MANAGER";
+    const isCoordinator = user?.type === "COORDINATOR";
 
-    useEffect(() => {
-        const fetchUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            setUser(user);
-        };
-        fetchUser();
-    }, [supabase.auth]);
-
-    useEffect(() => {
-        if (user) {
-            fetchFeedbacks();
-            if (isCoordinator) fetchCollaborators();
-        }
-    }, [user, isCoordinator]);
-
-    const fetchFeedbacks = async () => {
+    const fetchFeedbacks = useCallback(async () => {
         const res = await fetch("/api/feedback");
         if (res.ok) setFeedbacks(await res.json());
-    };
+    }, []);
 
-    const fetchCollaborators = async () => {
+    const fetchCollaborators = useCallback(async () => {
         const res = await fetch("/api/collaborators");
         if (res.ok) setCollaborators(await res.json());
-    };
+    }, []);
+
+    useEffect(() => {
+        if (!user) return;
+        fetchFeedbacks();
+        if (isCoordinator) fetchCollaborators();
+    }, [user, isCoordinator, fetchFeedbacks, fetchCollaborators]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -83,8 +77,8 @@ export default function FeedbackPage() {
             handleCancel();
             fetchFeedbacks();
         } else {
-            const errData = await res.json();
-            setError(errData.error || "Erro ao salvar feedback");
+            const errData = await res.json().catch(() => ({}));
+            setError(describeApiError(errData, "Erro ao salvar feedback."));
         }
         setLoading(false);
     };
@@ -98,8 +92,10 @@ export default function FeedbackPage() {
         setTag(fb.tag || "");
         setType(fb.type);
         setOrigin(fb.origin);
+        // BUG FIX: fechar modal de visualização para evitar sobreposição com o formulário de edição
+        setViewingFeedback(null);
+        setError("");
         setIsCreating(true);
-        window.scrollTo({ top: 0, behavior: "smooth" });
     };
 
     const handleDelete = async (id: string) => {
@@ -120,16 +116,23 @@ export default function FeedbackPage() {
         setOrigin("PERIODIC");
     };
 
-    if (!user || (!isCoordinator && !isManager)) return null;
+    if (sessionLoading) return <PageLoader label="Carregando feedbacks..." />;
+    if (!user) return null;
+    if (!isCoordinator && !isManager) {
+        return <AccessDenied message="Esta área está disponível para coordenadores e gerentes." />;
+    }
 
     const INPUT = "w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all";
     const LABEL = "block text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1.5";
 
+    const term = searchQuery.toLowerCase();
     const filteredFeedbacks = feedbacks.filter(fb =>
-        fb.collaborator.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        fb.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (fb.tag || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (fb.coordinator?.name || "").toLowerCase().includes(searchQuery.toLowerCase())
+        [
+            fb.collaborator?.name,
+            fb.content,
+            fb.tag,
+            fb.coordinator?.name,
+        ].some((field: string | null | undefined) => (field || "").toLowerCase().includes(term))
     );
 
     return (
@@ -142,9 +145,9 @@ export default function FeedbackPage() {
                         {isManager ? "Visualize os feedbacks registrados pelos seus coordenadores conectados." : "Registre e acompanhe o desenvolvimento dos colaboradores."}
                     </p>
                 </div>
-                {isCoordinator && !isCreating && (
+                {isCoordinator && (
                     <button
-                        onClick={() => setIsCreating(true)}
+                        onClick={() => { setError(""); setIsCreating(true); }}
                         className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md shadow-blue-500/10 transition-all"
                     >
                         <Plus size={18} /> Novo Feedback
@@ -158,16 +161,13 @@ export default function FeedbackPage() {
             </div>
 
             {/* Form Padronizado */}
-            {isCreating && isCoordinator && (
-                <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-lg overflow-hidden animate-in slide-in-from-top duration-300">
-                    <div className="p-4 border-b border-zinc-100 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/30 flex justify-between items-center">
-                        <h2 className="font-bold text-sm uppercase tracking-wider text-zinc-600 dark:text-zinc-400">
-                            {editingFeedback ? "Editar Registro" : "Registrar Novo Feedback"}
-                        </h2>
-                        <button onClick={handleCancel} className="p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded-full transition-colors">
-                            <X size={16} className="text-zinc-400" />
-                        </button>
-                    </div>
+            <FormModal
+                open={isCreating && isCoordinator}
+                onClose={handleCancel}
+                title={editingFeedback ? "Editar Registro" : "Registrar Novo Feedback"}
+                size="xl"
+                dismissable={!loading}
+            >
                     <form onSubmit={handleSubmit} className="p-6 space-y-6">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                             {error && (
@@ -253,8 +253,7 @@ export default function FeedbackPage() {
                             </div>
                         </div>
                     </form>
-                </div>
-            )}
+            </FormModal>
 
             {/* Listagem Padronizada (Tabela estilo Colaboradores) */}
             <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm overflow-hidden">
@@ -298,7 +297,7 @@ export default function FeedbackPage() {
                                             </div>
                                             <div className="overflow-hidden">
                                                 <div className="text-sm font-bold text-zinc-800 dark:text-zinc-100 truncate">{fb.collaborator.name}</div>
-                                                <div className="text-[10px] text-zinc-400 uppercase font-black tracking-tighter truncate">{fb.collaborator.role?.name || "Sem Cargo"}</div>
+                                                <div className="text-[10px] text-zinc-400 uppercase font-black tracking-tighter truncate">{roleLabel(fb.collaborator?.role?.name, "Sem cargo")}</div>
                                             </div>
                                         </div>
                                     </td>
@@ -320,7 +319,7 @@ export default function FeedbackPage() {
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 text-center">
-                                        <div className="text-xs font-medium text-zinc-500">{new Date(fb.date).toLocaleDateString()}</div>
+                                        <div className="text-xs font-medium text-zinc-500">{formatDate(fb.date)}</div>
                                     </td>
                                     {isManager && (
                                         <td className="px-6 py-4">
@@ -331,7 +330,7 @@ export default function FeedbackPage() {
                                     )}
                                     <td className="px-6 py-4">
                                         <p className="text-sm text-zinc-500 dark:text-zinc-400 line-clamp-1 italic max-w-xs transition-all duration-300">
-                                            "{fb.content}"
+                                            &ldquo;{fb.content}&rdquo;
                                         </p>
                                     </td>
                                     <td className="px-6 py-4 text-right">
@@ -371,20 +370,34 @@ export default function FeedbackPage() {
                 </div>
             </div>
 
-            {/* Modal de Visualização */}
+            {/* Modal de Visualização — usa o FormModal padrão para herdar
+                fechamento com ESC, trava de rolagem e o mesmo visual dos demais. */}
             {viewingFeedback && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
-                    <div className="bg-white dark:bg-zinc-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-800 overflow-hidden animate-in zoom-in-95 duration-200">
-                        <div className="p-6 border-b border-zinc-100 dark:border-zinc-800 flex justify-between items-center bg-zinc-50/50 dark:bg-zinc-800/30">
-                            <div>
-                                <h2 className="font-bold text-lg text-zinc-900 dark:text-zinc-100">Visualizar Feedback</h2>
-                                <p className="text-xs text-zinc-500 uppercase font-bold tracking-widest mt-0.5">Detalhes do Registro</p>
-                            </div>
-                            <button onClick={() => setViewingFeedback(null)} className="p-2 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded-full transition-colors text-zinc-400">
-                                <X size={20} />
+                <FormModal
+                    open
+                    onClose={() => setViewingFeedback(null)}
+                    title="Visualizar Feedback"
+                    subtitle="Detalhes do registro"
+                    size="lg"
+                    footer={
+                        <>
+                            {isCoordinator && (
+                                <button
+                                    onClick={() => handleEdit(viewingFeedback)}
+                                    className="px-4 py-2 text-sm font-semibold text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors"
+                                >
+                                    Editar registro
+                                </button>
+                            )}
+                            <button
+                                onClick={() => setViewingFeedback(null)}
+                                className="px-5 py-2 bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-sm font-bold rounded-lg transition-all hover:opacity-90"
+                            >
+                                Fechar
                             </button>
-                        </div>
-
+                        </>
+                    }
+                >
                         <div className="p-8 space-y-8">
                             <div className="flex flex-col md:flex-row justify-between gap-6">
                                 <div className="flex gap-4">
@@ -397,12 +410,12 @@ export default function FeedbackPage() {
                                     </div>
                                     <div>
                                         <div className="font-bold text-xl text-zinc-900 dark:text-zinc-100">{viewingFeedback.collaborator.name}</div>
-                                        <div className="text-sm text-zinc-500 font-medium">{viewingFeedback.collaborator.role?.name || "Sem Cargo"}</div>
+                                        <div className="text-sm text-zinc-500 font-medium">{roleLabel(viewingFeedback.collaborator?.role?.name, "Sem cargo")}</div>
                                     </div>
                                 </div>
                                 <div className="flex flex-col items-end">
                                     <div className="px-3 py-1 bg-zinc-100 dark:bg-zinc-800 rounded-lg text-xs font-bold text-zinc-600 dark:text-zinc-400 flex items-center gap-2">
-                                        <Calendar size={14} /> {new Date(viewingFeedback.date).toLocaleDateString()}
+                                        <Calendar size={14} /> {formatDate(viewingFeedback.date)}
                                     </div>
                                     <div className={`mt-2 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-tighter border ${FEEDBACK_TYPES[viewingFeedback.type as keyof typeof FEEDBACK_TYPES].color}`}>
                                         {FEEDBACK_TYPES[viewingFeedback.type as keyof typeof FEEDBACK_TYPES].label}
@@ -430,18 +443,11 @@ export default function FeedbackPage() {
                             <div className="space-y-2">
                                 <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Conteúdo do Feedback</label>
                                 <div className="p-6 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl italic text-zinc-700 dark:text-zinc-300 leading-relaxed font-serif whitespace-pre-wrap">
-                                    "{viewingFeedback.content}"
+                                    &ldquo;{viewingFeedback.content}&rdquo;
                                 </div>
                             </div>
                         </div>
-
-                        <div className="p-6 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/30 flex justify-end">
-                            <button onClick={() => setViewingFeedback(null)} className="px-6 py-2 bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-sm font-bold rounded-xl transition-transform hover:scale-105 active:scale-95 shadow-lg">
-                                FECHAR JANELA
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                </FormModal>
             )}
         </div>
     );

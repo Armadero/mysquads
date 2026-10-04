@@ -1,66 +1,58 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { queryOne, execute } from "@/lib/db";
 import { FeedbackSchema } from "@/lib/schemas";
-import { z } from "zod";
+import { handleApiError, notFound } from "@/lib/api/responses";
+import { requireCoordinator } from "@/lib/auth/guards";
 
-export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+type RouteContext = { params: Promise<{ id: string }> };
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
+export async function PUT(req: Request, { params }: RouteContext) {
     try {
+        const session = await requireCoordinator();
         const { id } = await params;
-        const data = await req.json();
-        const parsed = FeedbackSchema.parse(data);
+        const parsed = FeedbackSchema.parse(await req.json());
 
-        const { data: feedback, error } = await supabase
-            .from('Feedback')
-            .update({
-                date: new Date(parsed.date).toISOString(),
-                content: parsed.content,
-                tag: parsed.tag,
-                type: parsed.type,
-                origin: parsed.origin,
-                collaboratorId: parsed.collaboratorId
-            })
-            .eq('id', id)
-            .eq('coordinatorId', user.id)
-            .select()
-            .single();
+        const { changes } = execute(
+            `UPDATE Feedback
+             SET date = ?, content = ?, tag = ?, type = ?, origin = ?, collaboratorId = ?,
+                 updated_at = datetime('now')
+             WHERE id = ? AND coordinatorId = ?`,
+            [
+                new Date(parsed.date).toISOString(),
+                parsed.content,
+                parsed.tag ?? null,
+                parsed.type,
+                parsed.origin,
+                parsed.collaboratorId,
+                id,
+                session.sub,
+            ]
+        );
+        if (changes === 0) return notFound("Feedback not found");
 
-        if (error) throw error;
-
+        const feedback = queryOne(
+            "SELECT * FROM Feedback WHERE id = ? AND coordinatorId = ?",
+            [id, session.sub]
+        );
         return NextResponse.json(feedback);
-    } catch (error: unknown) {
-        if (error instanceof z.ZodError)
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        console.error("[PUT /api/feedback/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("PUT /api/feedback/:id", err);
     }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
+export async function DELETE(_req: Request, { params }: RouteContext) {
     try {
+        const session = await requireCoordinator();
         const { id } = await params;
-        const { error } = await supabase
-            .from('Feedback')
-            .delete()
-            .eq('id', id)
-            .eq('coordinatorId', user.id);
 
-        if (error) throw error;
+        const { changes } = execute(
+            "DELETE FROM Feedback WHERE id = ? AND coordinatorId = ?",
+            [id, session.sub]
+        );
+        if (changes === 0) return notFound("Feedback not found");
 
         return NextResponse.json({ success: true });
-    } catch (error: unknown) {
-        console.error("[DELETE /api/feedback/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("DELETE /api/feedback/:id", err);
     }
 }

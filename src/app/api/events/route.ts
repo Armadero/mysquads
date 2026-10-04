@@ -1,80 +1,84 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { queryAll, execute, transaction } from "@/lib/db";
 import { EventSchema } from "@/lib/schemas";
-import { z } from "zod";
+import { handleApiError } from "@/lib/api/responses";
+import { requireCoordinator } from "@/lib/auth/guards";
 
-export async function GET(_req: Request) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+interface EventRow {
+    id: number;
+    [key: string]: unknown;
+}
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function GET() {
+    try {
+        const session = await requireCoordinator();
+
+        // Fetch events and their attached collaborators in one go using json_group_array
+        const events = queryAll<EventRow & { collaborators: string | null }>(
+            `SELECT e.*,
+                    (
+                      SELECT json_group_array(
+                        json_object(
+                          'id', c.id, 'name', c.name, 'photoUrl', c.photoUrl,
+                          'roleId', c.roleId
+                        )
+                      )
+                      FROM IntegrationEventCollaborator iec
+                      JOIN Collaborator c ON iec.collaboratorId = c.id
+                      WHERE iec.eventId = e.id
+                    ) AS collaborators
+             FROM IntegrationEvent e
+             WHERE e.coordinatorId = ?
+             ORDER BY e.startDate DESC`,
+            [session.sub]
+        );
+
+        const enriched = events.map((e) => ({
+            ...e,
+            collaborators: e.collaborators ? JSON.parse(e.collaborators) : [],
+        }));
+
+        return NextResponse.json(enriched);
+    } catch (err) {
+        return handleApiError("GET /api/events", err);
     }
-
-    const { data: events, error } = await supabase
-        .from("IntegrationEvent")
-        .select(`
-      *,
-      collaborators:IntegrationEventCollaborator(
-        collaborator:Collaborator(*)
-      )
-    `)
-        .eq("coordinatorId", user.id)
-        .order("startDate", { ascending: false });
-
-    if (error) {
-        console.error("[GET /api/events]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-    }
-
-    return NextResponse.json(events || []);
 }
 
 export async function POST(req: Request) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     try {
-        const data = await req.json();
-        const parsed = EventSchema.parse(data);
+        const session = await requireCoordinator();
+        const parsed = EventSchema.parse(await req.json());
 
-        // 1. Create the event
-        const { data: event, error: eventError } = await supabase
-            .from("IntegrationEvent")
-            .insert({
-                startDate: new Date(parsed.startDate).toISOString(),
-                endDate: new Date(parsed.endDate).toISOString(),
-                coordinatorId: user.id,
-            })
-            .select()
-            .single();
+        let eventId: number | bigint = 0;
 
-        if (eventError) throw eventError;
+        transaction(() => {
+            const result = execute(
+                `INSERT INTO IntegrationEvent (startDate, endDate, coordinatorId)
+                 VALUES (?, ?, ?)`,
+                [
+                    new Date(parsed.startDate).toISOString(),
+                    new Date(parsed.endDate).toISOString(),
+                    session.sub,
+                ]
+            );
+            eventId = result.lastInsertRowid;
 
-        // 2. Attach the collaborators directly
-        if (parsed.collaboratorIds && parsed.collaboratorIds.length > 0) {
-            const inserts = parsed.collaboratorIds.map((id: string) => ({
-                eventId: event.id,
-                collaboratorId: id
-            }));
+            for (const collabId of parsed.collaboratorIds) {
+                execute(
+                    `INSERT INTO IntegrationEventCollaborator (eventId, collaboratorId)
+                     VALUES (?, ?)`,
+                    [eventId as number | bigint, collabId]
+                );
+            }
+        });
 
-            const { error: attachError } = await supabase
-                .from("IntegrationEventCollaborator")
-                .insert(inserts);
+        const event = queryAll(
+            "SELECT * FROM IntegrationEvent WHERE id = ?",
+            [Number(eventId)]
+        )[0];
 
-            if (attachError) throw attachError;
-        }
-
-        return NextResponse.json(event);
-    } catch (error: any) {
-        if (error instanceof z.ZodError) {
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        }
-        console.error("[POST /api/events]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return NextResponse.json(event, { status: 201 });
+    } catch (err) {
+        return handleApiError("POST /api/events", err);
     }
 }

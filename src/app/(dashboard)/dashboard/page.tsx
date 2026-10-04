@@ -1,75 +1,38 @@
 "use client";
-import { useState, useEffect } from "react";
-import { Search, CheckCircle, XCircle, Clock, Users, Gift, Cake, AlertTriangle, ArrowUpRight, ArrowRight } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { CheckCircle, Clock, Users, Gift, Cake, AlertTriangle, ArrowUpRight, ArrowRight, ShieldAlert } from "lucide-react";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/client";
-const roleTypeLabels: Record<string, string> = {
-    SCRUM_MASTER: "Scrum Master",
-    SYSTEM_ANALYST: "Analista de Sistemas",
-    PRODUCT_OWNER: "Product Owner",
-    DEVELOPER: "Desenvolvedor",
-    QA_ANALYST: "Analista de Teste",
-    SPECIALIST: "Especialista",
-    BUSINESS_ANALYST: "Analista de Negócios",
-    PRODUCT_MANAGER: "Product Manager"
-};
+import { useSession } from "@/lib/hooks/use-session";
+import { PageLoader } from "@/components/ui/page-state";
+import { cn } from "@/lib/utils";
+import { roleTypeLabels } from "@/lib/labels";
 
 export default function DashboardPage() {
-    const supabase = createClient();
-    const [user, setUser] = useState<any>(null);
+    const { user, loading: sessionLoading } = useSession();
     const [links, setLinks] = useState<{ id: string; status: string; coordinator?: { name: string; email: string }; manager?: { name: string; email: string } }[]>([]);
-    const [search, setSearch] = useState("");
-    const [coordinators, setCoordinators] = useState<{ id: string; name: string; email: string }[]>([]);
     const [dashboardData, setDashboardData] = useState<{ metrics?: Record<string, any>; managerMetrics?: { coordinatorName: string; metrics: Record<string, any> }[]; coordinatorMode?: boolean } | null>(null);
-    const [requestFeedback, setRequestFeedback] = useState<{ id: string; success: boolean; message: string } | null>(null);
+    const [loadingMetrics, setLoadingMetrics] = useState(true);
 
-    useEffect(() => {
-        const fetchUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            setUser(user);
-        };
-        fetchUser();
-    }, [supabase.auth]);
+    const fetchLinks = useCallback(async () => {
+        const res = await fetch("/api/links");
+        if (res.ok) setLinks(await res.json());
+    }, []);
+
+    const fetchDashboard = useCallback(async () => {
+        setLoadingMetrics(true);
+        try {
+            const res = await fetch("/api/dashboard");
+            if (res.ok) setDashboardData(await res.json());
+        } finally {
+            setLoadingMetrics(false);
+        }
+    }, []);
 
     useEffect(() => {
         if (!user) return;
         fetchLinks();
         fetchDashboard();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [user?.id]);
-
-    const fetchLinks = async () => {
-        const res = await fetch("/api/links");
-        if (res.ok) setLinks(await res.json());
-    };
-
-    const fetchDashboard = async () => {
-        const res = await fetch("/api/dashboard");
-        if (res.ok) setDashboardData(await res.json());
-    };
-
-    const searchCoordinators = async (e: React.FormEvent) => {
-        e.preventDefault();
-        const res = await fetch(`/api/coordinators?q=${encodeURIComponent(search)}`);
-        if (res.ok) setCoordinators(await res.json());
-    };
-
-    const requestLink = async (coordinatorId: string) => {
-        const res = await fetch("/api/links", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ coordinatorId }),
-        });
-        if (res.ok) {
-            setRequestFeedback({ id: coordinatorId, success: true, message: "Solicitação enviada com sucesso!" });
-            setTimeout(() => setRequestFeedback(null), 3000);
-            fetchLinks();
-        } else {
-            const data = await res.json();
-            setRequestFeedback({ id: coordinatorId, success: false, message: data.error || "Erro ao enviar solicitação." });
-            setTimeout(() => setRequestFeedback(null), 3000);
-        }
-    };
+    }, [user, fetchLinks, fetchDashboard]);
 
     const updateLink = async (id: string, status: string) => {
         const res = await fetch("/api/links", {
@@ -179,14 +142,17 @@ export default function DashboardPage() {
                         </div>
                         <div className="p-4 flex-1 overflow-y-auto max-h-[220px]">
                             <div className="space-y-2">
+                                {/* A severidade distingue os três tipos de alerta: saldo a vencer é
+                                    urgente (vermelho), acúmulo pede atenção (laranja) e falta de
+                                    integração é informativo (azul). Antes os três saíam em vermelho. */}
                                 {metrics.expiringTimebank.map((tb: any, i: number) => (
                                     <AlertItem key={`expiring-${i}-${tb.name}`} type="error" title={tb.name} description={`${tb.balance}h (vence em ${tb.daysLeft}d)`} photoUrl={tb.photoUrl} />
                                 ))}
                                 {metrics.highTimebank.map((tb: any, i: number) => (
-                                    <AlertItem key={`high-${i}-${tb.name}`} type="error" title={tb.name} description={`${tb.balance}h acumulado`} photoUrl={tb.photoUrl} />
+                                    <AlertItem key={`high-${i}-${tb.name}`} type="warning" title={tb.name} description={`${tb.balance}h acumulado`} photoUrl={tb.photoUrl} />
                                 ))}
                                 {metrics.noIntegration.map((ni: any, i: number) => (
-                                    <AlertItem key={`noint-${i}-${ni.name}`} type="error" title={ni.name} description={`Sem integração (${ni.years}a)`} photoUrl={ni.photoUrl} />
+                                    <AlertItem key={`noint-${i}-${ni.name}`} type="info" title={ni.name} description={`Sem integração (${ni.years}a)`} photoUrl={ni.photoUrl} />
                                 ))}
                                 {metrics.expiringTimebank.length === 0 && metrics.highTimebank.length === 0 && metrics.noIntegration.length === 0 && (
                                     <div className="flex flex-col items-center justify-center py-8 text-zinc-400">
@@ -202,15 +168,15 @@ export default function DashboardPage() {
         );
     };
 
-    if (!user) return null;
+    if (sessionLoading || !user) return <PageLoader label="Carregando painel..." />;
 
-    const isManager = user.user_metadata?.type === "MANAGER";
+    const isManager = user.type === "MANAGER";
 
     return (
         <div className="space-y-8 animate-in fade-in duration-500">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
-                    <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Olá, {user.user_metadata?.name?.split(' ')[0] || 'usuário'} 👋</h1>
+                    <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Olá, {user.name?.split(' ')[0] || 'usuário'} 👋</h1>
                     <p className="text-sm text-zinc-500 dark:text-zinc-400">Aqui está o resumo atual das suas equipes.</p>
                 </div>
                 {isManager && (
@@ -220,7 +186,9 @@ export default function DashboardPage() {
                 )}
             </div>
 
-            {isManager ? (
+            {loadingMetrics ? (
+                <PageLoader label="Carregando métricas..." />
+            ) : isManager ? (
                 <div className="space-y-10">
                     {dashboardData && dashboardData.managerMetrics && dashboardData.managerMetrics.length > 0 ? (
                         <>
@@ -329,7 +297,7 @@ export default function DashboardPage() {
                         </section>
                     )}
 
-                    {dashboardData && dashboardData.metrics && renderMetrics(dashboardData.metrics as Record<string, any>, "Métricas da Equipe")}
+                    {dashboardData?.metrics && renderMetrics(dashboardData.metrics as Record<string, any>, "Métricas da Equipe")}
                 </div>
             )}
         </div>
@@ -337,16 +305,26 @@ export default function DashboardPage() {
 }
 
 function MetricCard({ label, value, icon, color, items, href }: { label: string, value: number, icon: any, color: string, items?: string[], href?: string }) {
-    const colorMap: any = {
-        blue: "bg-blue-50 text-blue-600 border-blue-100 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-900/30",
-        green: "bg-green-50 text-green-600 border-green-100 dark:bg-green-900/20 dark:text-green-400 dark:border-green-900/30",
-        orange: "bg-orange-50 text-orange-600 border-orange-100 dark:bg-orange-900/20 dark:text-orange-400 dark:border-orange-900/30",
-        purple: "bg-purple-50 text-purple-600 border-purple-100 dark:bg-purple-900/20 dark:text-purple-400 dark:border-purple-900/30",
-        red: `bg-red-50 text-red-600 border-red-100 dark:bg-red-900/20 dark:text-red-400 dark:border-red-900/30 ${value > 0 ? "animate-pulse" : ""}`,
-        gray: "bg-zinc-50 text-zinc-400 border-zinc-100 dark:bg-zinc-800/50 dark:text-zinc-500 dark:border-zinc-800"
+    // O card tem fundo branco; a cor identifica o tema via texto/borda apenas.
+    // Antes o mapa trazia um `bg-*-50` que colidia com o `bg-white` aplicado
+    // logo em seguida — qual dos dois vencia dependia da ordem no CSS gerado,
+    // deixando os cards com fundos inconsistentes entre builds.
+    const colorMap: Record<string, string> = {
+        blue: "text-blue-600 border-blue-100 dark:text-blue-400 dark:border-blue-900/30",
+        green: "text-green-600 border-green-100 dark:text-green-400 dark:border-green-900/30",
+        orange: "text-orange-600 border-orange-100 dark:text-orange-400 dark:border-orange-900/30",
+        purple: "text-purple-600 border-purple-100 dark:text-purple-400 dark:border-purple-900/30",
+        red: "text-red-600 border-red-100 dark:text-red-400 dark:border-red-900/30",
+        gray: "text-zinc-400 border-zinc-100 dark:text-zinc-500 dark:border-zinc-800",
     };
 
-    const CardContent = () => (
+    const baseClass = cn(
+        "p-5 rounded-2xl border shadow-sm bg-white dark:bg-zinc-900 group transition-all duration-300 flex flex-col",
+        colorMap[color] || colorMap.blue
+    );
+    const interactiveClass = href ? "hover:scale-[1.02] cursor-pointer hover:shadow-md" : "";
+
+    const content = (
         <>
             <div className="flex justify-between items-start mb-4">
                 <span className="text-[10px] font-black uppercase tracking-widest opacity-80">{label}</span>
@@ -370,22 +348,15 @@ function MetricCard({ label, value, icon, color, items, href }: { label: string,
         </>
     );
 
-    const baseClass = `p-5 rounded-2xl border shadow-sm ${colorMap[color] || colorMap.blue} bg-white dark:bg-zinc-900 group transition-all duration-300 flex flex-col`;
-    const interactiveClass = href ? "hover:scale-[1.02] cursor-pointer hover:shadow-md" : "";
-
     if (href) {
         return (
-            <Link href={href} className={`${baseClass} ${interactiveClass}`}>
-                <CardContent />
+            <Link href={href} className={cn(baseClass, interactiveClass)}>
+                {content}
             </Link>
         );
     }
 
-    return (
-        <div className={baseClass}>
-            <CardContent />
-        </div>
-    );
+    return <div className={baseClass}>{content}</div>;
 }
 
 function AlertItem({ type, title, description, photoUrl }: { type: 'error' | 'warning' | 'info', title: string, description: string, photoUrl?: string }) {
@@ -407,17 +378,10 @@ function AlertItem({ type, title, description, photoUrl }: { type: 'error' | 'wa
                         {initials}
                     </div>
                 )}
-                <span className="font-black uppercase truncate">{title}</span>
+                <span className="font-black uppercase truncate" title={title}>{title}</span>
             </div>
-            <span className="font-bold opacity-70 shrink-0 ml-2 bg-white/20 px-2 py-0.5 rounded shadow-sm">{description}</span>
+            <span className="font-bold opacity-70 shrink-0 ml-2 bg-white/20 px-2 py-0.5 rounded shadow-sm whitespace-nowrap">{description}</span>
         </div>
     );
 }
 
-function ShieldAlert({ size = 20 }: { size?: number }) {
-    return <AlertTriangle size={size} />;
-}
-
-function ShieldCheck({ size = 20, strokeWidth = 2, className = "" }: { size?: number, strokeWidth?: number, className?: string }) {
-    return <CheckCircle size={size} strokeWidth={strokeWidth} className={className} />;
-}

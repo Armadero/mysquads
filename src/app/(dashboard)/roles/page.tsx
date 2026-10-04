@@ -1,73 +1,96 @@
 "use client";
-import { useState, useEffect } from "react";
-import { Plus, Edit2, Trash2, Settings, X, Palette, ChevronRight, CheckCircle } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { useState, useEffect, useCallback } from "react";
+import { Plus, Edit2, Trash2, Palette, CheckCircle, AlertCircle, X } from "lucide-react";
+import { FormModal } from "@/components/ui/form-modal";
+import { useSession } from "@/lib/hooks/use-session";
+import { PageLoader, AccessDenied } from "@/components/ui/page-state";
+import { roleTypeLabels } from "@/lib/labels";
+
+const EMPTY_ROLE = () => ({
+    name: "DEVELOPER",
+    defaultColor: "#4A90E2",
+    maxSquads: 1,
+    order: 0,
+    qtyPerSquad: 1,
+    multipleSquads: false,
+});
 
 export default function RolesPage() {
-    const supabase = createClient();
-    const [user, setUser] = useState<any>(null);
+    const { user, loading: sessionLoading, isCoordinator } = useSession();
     const [roles, setRoles] = useState<any[]>([]);
     const [isEditing, setIsEditing] = useState(false);
     const [loading, setLoading] = useState(false);
-    const [currentRole, setCurrentRole] = useState<any>({ name: "DEVELOPER", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
+    const [error, setError] = useState("");
+    const [listError, setListError] = useState("");
+    const [currentRole, setCurrentRole] = useState<any>(EMPTY_ROLE());
 
-    const roleTypeLabels: Record<string, string> = {
-        SCRUM_MASTER: "Scrum Master",
-        SYSTEM_ANALYST: "Analista de Sistemas",
-        PRODUCT_OWNER: "Product Owner",
-        DEVELOPER: "Desenvolvedor",
-        QA_ANALYST: "Analista de Teste",
-        SPECIALIST: "Especialista",
-        BUSINESS_ANALYST: "Analista de Negócios",
-        PRODUCT_MANAGER: "Product Manager"
-    };
-
-    useEffect(() => {
-        const fetchUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            setUser(user);
-        };
-        fetchUser();
-    }, [supabase.auth]);
+    const fetchRoles = useCallback(async () => {
+        const res = await fetch("/api/roles");
+        if (res.ok) setRoles(await res.json());
+    }, []);
 
     useEffect(() => {
         if (user) fetchRoles();
-    }, [user]);
-
-    const fetchRoles = async () => {
-        const res = await fetch("/api/roles");
-        if (res.ok) setRoles(await res.json());
-    };
+    }, [user, fetchRoles]);
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
-        const method = (currentRole as any).id ? "PUT" : "POST";
-        const url = (currentRole as any).id ? `/api/roles/${(currentRole as any).id}` : "/api/roles";
+        setError("");
 
-        const res = await fetch(url, {
-            method,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(currentRole)
-        });
+        const method = currentRole.id ? "PUT" : "POST";
+        const url = currentRole.id ? `/api/roles/${currentRole.id}` : "/api/roles";
 
-        if (res.ok) {
+        try {
+            const res = await fetch(url, {
+                method,
+                headers: { "Content-Type": "application/json" },
+                // Só os campos que a API aceita. Reenviar o registro inteiro
+                // (id, coordinatorId, created_at...) não quebra, mas manter o
+                // payload enxuto evita surpresas quando o schema mudar.
+                body: JSON.stringify({
+                    name: currentRole.name,
+                    defaultColor: currentRole.defaultColor,
+                    qtyPerSquad: Number(currentRole.qtyPerSquad) || 1,
+                    maxSquads: Number(currentRole.maxSquads) || 1,
+                    multipleSquads: !!currentRole.multipleSquads,
+                    order: Number(currentRole.order) || 0,
+                }),
+            });
+
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                // Antes a falha era engolida: o modal simplesmente não fechava
+                // e o usuário não fazia ideia do porquê.
+                setError(data.error || "Não foi possível salvar o cargo.");
+                return;
+            }
+
             setIsEditing(false);
-            setCurrentRole({ name: "DEVELOPER", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
+            setCurrentRole(EMPTY_ROLE());
             fetchRoles();
+        } catch {
+            setError("Erro de conexão com o servidor.");
+        } finally {
+            setLoading(false);
         }
-        setLoading(false);
     };
 
     const handleDelete = async (id: string) => {
-        if (!confirm("Remover este cargo? Colaboradores vinculados ficarão sem cargo.")) return;
-        const res = await fetch(`/api/roles/${id}`, {
-            method: "DELETE",
-        });
-        if (res.ok) fetchRoles();
+        if (!confirm("Remover este cargo? Só é possível se nenhum colaborador estiver vinculado a ele.")) return;
+        setListError("");
+        const res = await fetch(`/api/roles/${id}`, { method: "DELETE" });
+        if (res.ok) {
+            fetchRoles();
+            return;
+        }
+        const data = await res.json().catch(() => ({}));
+        setListError(data.error || "Não foi possível remover o cargo.");
     };
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") return null;
+    if (sessionLoading) return <PageLoader label="Carregando cargos..." />;
+    if (!user) return null;
+    if (!isCoordinator) return <AccessDenied />;
 
     const INPUT = "w-full px-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all";
     const LABEL = "block text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-1.5";
@@ -80,27 +103,24 @@ export default function RolesPage() {
                     <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Cargos e Funções</h1>
                     <p className="text-sm text-zinc-500 dark:text-zinc-400">Personalize as funções disponíveis para sua equipe.</p>
                 </div>
-                {!isEditing && (
-                    <button
-                        onClick={() => {
-                            setCurrentRole({ name: "DEVELOPER", defaultColor: "#4A90E2", maxSquads: 1, order: 0, qtyPerSquad: 1 });
-                            setIsEditing(true);
-                        }}
-                        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md shadow-blue-500/10 transition-colors"
-                    >
-                        <Plus size={18} /> Adicionar Cargo
-                    </button>
-                )}
+                <button
+                    onClick={() => {
+                        setCurrentRole(EMPTY_ROLE());
+                        setError("");
+                        setIsEditing(true);
+                    }}
+                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md shadow-blue-500/10 transition-colors"
+                >
+                    <Plus size={18} /> Adicionar Cargo
+                </button>
             </div>
 
-            {isEditing && (
-                <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-lg overflow-hidden">
-                    <div className="p-4 border-b border-zinc-100 dark:border-zinc-800 flex justify-between items-center bg-zinc-50/50 dark:bg-zinc-800/30">
-                        <h2 className="font-bold text-sm uppercase tracking-wider text-zinc-600 dark:text-zinc-400">{currentRole.id ? "Editar Cargo" : "Criar Novo Cargo"}</h2>
-                        <button onClick={() => setIsEditing(false)} className="p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded-full transition-colors">
-                            <X size={16} className="text-zinc-400" />
-                        </button>
-                    </div>
+            <FormModal
+                open={isEditing}
+                onClose={() => setIsEditing(false)}
+                title={currentRole.id ? "Editar Cargo" : "Criar Novo Cargo"}
+                size="lg"
+            >
                     <form onSubmit={handleSave} className="p-6 space-y-6">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="space-y-1 md:col-span-2">
@@ -151,6 +171,20 @@ export default function RolesPage() {
                                 />
                             </div>
 
+                            {/* BUG FIX: campo multipleSquads adicionado para não ser resetado para false a cada edição */}
+                            <div className="md:col-span-2 flex items-center gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg border border-zinc-100 dark:border-zinc-700">
+                                <input
+                                    type="checkbox"
+                                    id="multipleSquads"
+                                    className="w-4 h-4 accent-blue-600 cursor-pointer"
+                                    checked={!!currentRole.multipleSquads}
+                                    onChange={e => setCurrentRole({ ...currentRole, multipleSquads: e.target.checked })}
+                                />
+                                <label htmlFor="multipleSquads" className="text-xs font-semibold text-zinc-600 dark:text-zinc-300 cursor-pointer select-none">
+                                    Permite participar de múltiplos squads simultaneamente
+                                </label>
+                            </div>
+
                             <div className="space-y-3 md:col-span-2">
                                 <label className={`${LABEL} flex items-center gap-2`}>
                                     <Palette size={14} className="text-blue-500" /> Cor de Identificação
@@ -172,6 +206,13 @@ export default function RolesPage() {
                             </div>
                         </div>
 
+                        {error && (
+                            <div className="flex items-start gap-2 p-3 bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 text-red-600 dark:text-red-400 text-xs font-semibold rounded-lg animate-in fade-in duration-200">
+                                <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                                <span>{error}</span>
+                            </div>
+                        )}
+
                         <div className="flex justify-end gap-3 pt-4 border-t border-zinc-100 dark:border-zinc-800">
                             <button type="button" onClick={() => setIsEditing(false)} className="px-4 py-2 text-sm font-semibold text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition-colors">Cancelar</button>
                             <button disabled={loading} type="submit" className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-lg transition-all shadow-md shadow-blue-500/10">
@@ -179,6 +220,15 @@ export default function RolesPage() {
                             </button>
                         </div>
                     </form>
+            </FormModal>
+
+            {listError && (
+                <div className="flex items-start gap-2 p-3 bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 text-red-600 dark:text-red-400 text-xs font-semibold rounded-lg animate-in fade-in duration-200">
+                    <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                    <span className="flex-1">{listError}</span>
+                    <button onClick={() => setListError("")} className="shrink-0 hover:opacity-70" aria-label="Fechar aviso">
+                        <X size={14} />
+                    </button>
                 </div>
             )}
 
@@ -214,7 +264,7 @@ export default function RolesPage() {
                                     </td>
                                     <td className="px-6 py-4 text-right">
                                         <div className="flex items-center justify-end gap-1">
-                                            <button onClick={() => { setCurrentRole(role); setIsEditing(true); }} className="p-2 text-zinc-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-all">
+                                            <button onClick={() => { setCurrentRole({ ...role, multipleSquads: !!role.multipleSquads }); setError(""); setIsEditing(true); }} className="p-2 text-zinc-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-all">
                                                 <Edit2 size={16} />
                                             </button>
                                             <button onClick={() => handleDelete(role.id)} className="p-2 text-zinc-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-all">
@@ -232,7 +282,7 @@ export default function RolesPage() {
                                 <Palette size={32} />
                             </div>
                             <p className="text-zinc-500 font-medium italic">Nenhum cargo foi registrado ainda.</p>
-                            <button onClick={() => setIsEditing(true)} className="mt-4 text-sm font-bold text-blue-600 hover:underline">Adicionar o primeiro</button>
+                            <button onClick={() => { setCurrentRole(EMPTY_ROLE()); setError(""); setIsEditing(true); }} className="mt-4 text-sm font-bold text-blue-600 hover:underline">Adicionar o primeiro</button>
                         </div>
                     )}
                 </div>

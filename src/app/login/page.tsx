@@ -3,7 +3,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Lock, Mail, Loader2 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
     const router = useRouter();
@@ -11,24 +10,32 @@ export default function LoginPage() {
     const [password, setPassword] = useState("");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
-    const supabase = createClient();
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
         setError("");
 
-        const { error } = await supabase.auth.signInWithPassword({
-            email,
-            password,
-        });
+        try {
+            const res = await fetch("/api/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email, password }),
+            });
 
-        if (error) {
-            setError(error.message || "Credenciais inválidas. Verifique seus dados.");
-            setLoading(false);
-        } else {
+            const data = await res.json();
+
+            if (!res.ok) {
+                setError(data.error || "Credenciais inválidas. Verifique seus dados.");
+                setLoading(false);
+                return;
+            }
+
             router.push("/dashboard");
             router.refresh();
+        } catch {
+            setError("Erro ao conectar. Tente novamente.");
+            setLoading(false);
         }
     };
 
@@ -69,7 +76,6 @@ export default function LoginPage() {
                         <div className="space-y-1.5">
                             <div className="flex justify-between items-center">
                                 <label className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Senha</label>
-                                <Link href="#" className="text-xs font-medium text-blue-600 hover:text-blue-500">Esqueceu a senha?</Link>
                             </div>
                             <div className="relative">
                                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={18} />

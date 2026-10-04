@@ -1,70 +1,57 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { queryOne, execute } from "@/lib/db";
+import { SquadSchema } from "@/lib/schemas";
+import { handleApiError, notFound } from "@/lib/api/responses";
+import { requireCoordinator } from "@/lib/auth/guards";
 
-export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+type RouteContext = { params: Promise<{ id: string }> };
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function PUT(req: Request, { params }: RouteContext) {
+    try {
+        const session = await requireCoordinator();
+        const { id } = await params;
+        const parsed = SquadSchema.parse(await req.json());
+
+        const { changes } = execute(
+            `UPDATE Squad
+             SET name = ?, jiraLink = ?, confluenceLink = ?, sprintStart = ?, sprintDays = ?
+             WHERE id = ? AND coordinatorId = ?`,
+            [
+                parsed.name,
+                parsed.jiraLink || null,
+                parsed.confluenceLink || null,
+                parsed.sprintStart ? new Date(parsed.sprintStart).toISOString() : null,
+                parsed.sprintDays,
+                id,
+                session.sub,
+            ]
+        );
+        if (changes === 0) return notFound("Squad not found");
+
+        const squad = queryOne(
+            "SELECT * FROM Squad WHERE id = ? AND coordinatorId = ?",
+            [id, session.sub]
+        );
+        return NextResponse.json(squad);
+    } catch (err) {
+        return handleApiError("PUT /api/squads/:id", err);
     }
-
-    const data = await req.json();
-
-    const { data: squad, error } = await supabase
-        .from("Squad")
-        .update({
-            name: data.name,
-            jiraLink: data.jiraLink || null,
-            confluenceLink: data.confluenceLink || null,
-            sprintStart: data.sprintStart ? new Date(data.sprintStart).toISOString() : null,
-            sprintDays: Number(data.sprintDays) || 14,
-        })
-        .eq("id", id)
-        .eq("coordinatorId", user.id)
-        .select()
-        .single();
-
-    if (error) {
-        console.error("[PUT /api/squads/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-    }
-
-    return NextResponse.json(squad);
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+export async function DELETE(_req: Request, { params }: RouteContext) {
+    try {
+        const session = await requireCoordinator();
+        const { id } = await params;
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        // SQLite CASCADE handles deleting SquadCollaborator rows
+        const { changes } = execute(
+            "DELETE FROM Squad WHERE id = ? AND coordinatorId = ?",
+            [id, session.sub]
+        );
+        if (changes === 0) return notFound("Squad not found");
+
+        return NextResponse.json({ success: true });
+    } catch (err) {
+        return handleApiError("DELETE /api/squads/:id", err);
     }
-
-    // Delete relations first
-    const { error: collabError } = await supabase
-        .from("SquadCollaborator")
-        .delete()
-        .eq("squadId", id);
-
-    if (collabError) {
-        console.error("[DELETE /api/squads/:id] collabError", collabError);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-    }
-
-    const { error } = await supabase
-        .from("Squad")
-        .delete()
-        .eq("id", id)
-        .eq("coordinatorId", user.id);
-
-    if (error) {
-        console.error("[DELETE /api/squads/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-    }
-
-    return NextResponse.json({ success: true });
 }
-

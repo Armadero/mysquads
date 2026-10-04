@@ -1,102 +1,107 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { z } from "zod";
+import { queryAll, queryOne, execute } from "@/lib/db";
+import { SquadSchema } from "@/lib/schemas";
+import { handleApiError } from "@/lib/api/responses";
+import {
+    requireCoordinator,
+    requireUser,
+    resolveReadableCoordinatorIds,
+} from "@/lib/auth/guards";
 
-const SquadSchema = z.object({
-    name: z.string().min(1, "Name is required"),
-    jiraLink: z.string().url("Invalid URL").optional().or(z.literal("")),
-    confluenceLink: z.string().url("Invalid URL").optional().or(z.literal("")),
-    sprintStart: z.string().optional().nullable(),
-    sprintDays: z.number().int().min(1).optional().default(14),
-});
+interface SquadRow {
+    id: number;
+    [key: string]: unknown;
+}
+
+interface SquadCollaboratorRow {
+    id: number;
+    role: string | null;
+    [key: string]: unknown;
+}
 
 export async function GET() {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    try {
+        const session = await requireUser();
+        const coordinatorIds = resolveReadableCoordinatorIds(session);
+        if (coordinatorIds.length === 0) return NextResponse.json([]);
 
-    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        const placeholders = coordinatorIds.map(() => "?").join(",");
+        const squads = queryAll<SquadRow>(
+            `SELECT * FROM Squad WHERE coordinatorId IN (${placeholders}) ORDER BY name ASC`,
+            coordinatorIds
+        );
 
-    let coordinatorIds: string[] = [];
-    const type = user.user_metadata?.type;
+        if (squads.length === 0) return NextResponse.json([]);
 
-    if (type === "COORDINATOR") {
-        coordinatorIds = [user.id];
-    } else if (type === "MANAGER") {
-        const { data: links } = await supabase
-            .from("ManagerCoordinatorLink")
-            .select("coordinatorId")
-            .eq("managerId", user.id)
-            .eq("status", "APPROVED");
+        // Bulk-fetch collaborators for all squads and group in memory (avoids N+1)
+        const squadIds = squads.map((s) => s.id);
+        const squadPlaceholders = squadIds.map(() => "?").join(",");
 
-        if (links) {
-            coordinatorIds = links.map(link => link.coordinatorId);
+        const allCollaborators = queryAll<SquadCollaboratorRow & { squadId: number }>(
+            `SELECT sc.squadId, c.*,
+                    CASE WHEN r.id IS NOT NULL
+                         THEN json_object(
+                            'id', r.id, 'name', r.name, 'defaultColor', r.defaultColor,
+                            'maxSquads', r.maxSquads, 'multipleSquads', r.multipleSquads,
+                            'order', r."order"
+                         )
+                         ELSE NULL
+                    END as role
+             FROM SquadCollaborator sc
+             JOIN Collaborator c ON sc.collaboratorId = c.id
+             LEFT JOIN Role r ON c.roleId = r.id
+             WHERE sc.squadId IN (${squadPlaceholders})`,
+            squadIds
+        );
+
+        const bySquad = new Map<number, SquadCollaboratorRow[]>();
+        for (const row of allCollaborators) {
+            const { squadId, ...rest } = row;
+            const parsed: SquadCollaboratorRow = {
+                ...rest,
+                role: rest.role ? JSON.parse(rest.role as string) : null,
+            };
+            const list = bySquad.get(squadId);
+            if (list) list.push(parsed);
+            else bySquad.set(squadId, [parsed]);
         }
-    } else {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+        const enriched = squads.map((s) => ({
+            ...s,
+            collaborators: bySquad.get(s.id) ?? [],
+        }));
+
+        return NextResponse.json(enriched);
+    } catch (err) {
+        return handleApiError("GET /api/squads", err);
     }
-
-    if (coordinatorIds.length === 0) {
-        return NextResponse.json([]);
-    }
-
-    const { data: squads, error } = await supabase
-        .from("Squad")
-        .select(`
-      *,
-      collaborators:SquadCollaborator(
-        collaborator:Collaborator(
-          *,
-          role:Role(*)
-        )
-      )
-    `)
-        .in("coordinatorId", coordinatorIds);
-
-    if (error) {
-        console.error("[GET /api/squads]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-    }
-
-    const flattened = (squads || []).map((s: any) => ({
-        ...s,
-        collaborators: (s.collaborators || []).map((c: any) => ({ ...c.collaborator }))
-    }));
-
-    return NextResponse.json(flattened);
 }
 
 export async function POST(req: Request) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
     try {
-        const data = await req.json();
-        const parsed = SquadSchema.parse(data);
+        const session = await requireCoordinator();
+        const parsed = SquadSchema.parse(await req.json());
 
-        const { data: squad, error } = await supabase
-            .from("Squad")
-            .insert({
-                name: parsed.name,
-                jiraLink: parsed.jiraLink || null,
-                confluenceLink: parsed.confluenceLink || null,
-                sprintStart: parsed.sprintStart ? new Date(parsed.sprintStart).toISOString() : null,
-                sprintDays: parsed.sprintDays,
-                coordinatorId: user.id
-            })
-            .select()
-            .single();
+        const { lastInsertRowid } = execute(
+            `INSERT INTO Squad (name, jiraLink, confluenceLink, sprintStart, sprintDays, coordinatorId)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+                parsed.name,
+                parsed.jiraLink || null,
+                parsed.confluenceLink || null,
+                parsed.sprintStart ? new Date(parsed.sprintStart).toISOString() : null,
+                parsed.sprintDays,
+                session.sub,
+            ]
+        );
 
-        if (error) throw error;
+        const squad = queryOne(
+            "SELECT * FROM Squad WHERE id = ?",
+            [Number(lastInsertRowid)]
+        );
+
         return NextResponse.json(squad, { status: 201 });
-    } catch (error: any) {
-        if (error instanceof z.ZodError) {
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        }
-        console.error("[POST /api/squads]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("POST /api/squads", err);
     }
 }

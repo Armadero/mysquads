@@ -1,74 +1,53 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { queryOne, execute } from "@/lib/db";
 import { CollaboratorSchema } from "@/lib/schemas";
-import { z } from "zod";
+import { updateCollaborator } from "@/lib/db/collaborators";
+import { badRequest, handleApiError, notFound } from "@/lib/api/responses";
+import { requireCoordinator } from "@/lib/auth/guards";
 
-export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+type RouteContext = { params: Promise<{ id: string }> };
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
+export async function PUT(req: Request, { params }: RouteContext) {
     try {
-        const data = await req.json();
-        const parsed = CollaboratorSchema.parse(data);
-        const { email: collabEmail, roleId, matricula, ...rest } = parsed;
+        const session = await requireCoordinator();
+        const { id } = await params;
+        const parsed = CollaboratorSchema.parse(await req.json());
 
-        const updateData = {
-            ...rest,
-            email: collabEmail ?? null,
-            matricula: matricula || null,
-            admissionDate: new Date(parsed.admissionDate).toISOString(),
-            birthDate: parsed.birthDate ? new Date(parsed.birthDate).toISOString() : null,
-            resignationDate: parsed.resignationDate ? new Date(parsed.resignationDate).toISOString() : null,
-            roleId: roleId as string
-        };
-
-        const { data: collab, error } = await supabase
-            .from('Collaborator')
-            .update(updateData)
-            .eq('id', id)
-            .eq('coordinatorId', user.id)
-            .select()
-            .single();
-
-        if (error) {
-            if (error.code === '23505' && error.message.includes('matricula')) {
-                return NextResponse.json({ error: "Esta matrícula já está em uso por outro colaborador." }, { status: 400 });
+        if (parsed.matricula) {
+            const dup = queryOne(
+                `SELECT id FROM Collaborator WHERE matricula = ? AND id != ?`,
+                [parsed.matricula, id]
+            );
+            if (dup) {
+                return badRequest(
+                    "Esta matrícula já está em uso por outro colaborador."
+                );
             }
-            throw error;
         }
 
+        const { changes } = updateCollaborator(id, parsed, session.sub);
+        if (changes === 0) return notFound("Collaborator not found");
+
+        const collab = queryOne(`SELECT * FROM Collaborator WHERE id = ?`, [id]);
         return NextResponse.json(collab);
-    } catch (error: any) {
-        if (error instanceof z.ZodError)
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        console.error("[PUT /api/collaborators/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("PUT /api/collaborators/:id", err);
     }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
+export async function DELETE(_req: Request, { params }: RouteContext) {
     try {
-        const { error } = await supabase
-            .from('Collaborator')
-            .delete()
-            .eq('id', id)
-            .eq('coordinatorId', user.id);
+        const session = await requireCoordinator();
+        const { id } = await params;
 
-        if (error) throw error;
+        const { changes } = execute(
+            `DELETE FROM Collaborator WHERE id = ? AND coordinatorId = ?`,
+            [id, session.sub]
+        );
+        if (changes === 0) return notFound("Collaborator not found");
+
         return NextResponse.json({ success: true });
-    } catch (error: unknown) {
-        console.error("[DELETE /api/collaborators/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("DELETE /api/collaborators/:id", err);
     }
 }

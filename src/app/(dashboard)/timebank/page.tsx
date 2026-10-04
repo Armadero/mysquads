@@ -1,10 +1,9 @@
 "use client";
 import { useState, useEffect } from "react";
-import { Clock, Upload, AlertTriangle, CheckCircle, FileText, X, Search, Info, ArrowUpRight } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { Upload, AlertTriangle, CheckCircle, FileText, X, Info } from "lucide-react";
+import { formatDate } from "@/lib/utils";
 
 export default function TimebankPage() {
-    const supabase = createClient();
     const [user, setUser] = useState<any>(null);
     const [alerts, setAlerts] = useState<any[]>([]);
     const [file, setFile] = useState<File | null>(null);
@@ -14,20 +13,20 @@ export default function TimebankPage() {
 
     useEffect(() => {
         const fetchUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
+            const user = await fetch("/api/auth/me").then(r => r.json());
             setUser(user);
         };
         fetchUser();
-    }, [supabase.auth]);
+    }, []);
 
     useEffect(() => {
         if (user) fetchAlerts();
     }, [user]);
 
-    const fetchAlerts = async () => {
+    async function fetchAlerts() {
         const res = await fetch("/api/timebank");
         if (res.ok) setAlerts(await res.json());
-    };
+    }
 
     const handleUpload = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -58,7 +57,7 @@ export default function TimebankPage() {
         setLoading(false);
     };
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") return null;
+    if (!user || user.type !== "COORDINATOR") return null;
 
     return (
         <div className="space-y-10 animate-in fade-in duration-500 pb-20 font-sans">
@@ -90,35 +89,50 @@ export default function TimebankPage() {
                                         <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider">Colaborador</th>
                                         <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-center">Saldo Crítico</th>
                                         <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-center">Expiração</th>
-                                        <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-right">Ações</th>
+                                        <th className="px-6 py-4 font-semibold text-xs uppercase tracking-wider text-right">Motivo</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                                    {alerts.map((alert, i) => (
-                                        <tr key={i} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors group">
+                                    {alerts.map((alert) => (
+                                        <tr key={alert.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors group">
                                             <td className="px-6 py-4">
                                                 <div className="flex items-center gap-3">
-                                                    <div className="w-8 h-8 rounded-lg bg-orange-50 dark:bg-orange-900/20 flex items-center justify-center text-orange-600 font-bold text-xs">
-                                                        {alert.name[0]}
+                                                    <div className="w-8 h-8 rounded-lg bg-orange-50 dark:bg-orange-900/20 flex items-center justify-center text-orange-600 font-bold text-xs overflow-hidden shrink-0">
+                                                        {alert.photoUrl
+                                                            ? <img src={alert.photoUrl} alt={alert.name} className="w-full h-full object-cover" />
+                                                            : (alert.name || "?").substring(0, 2).toUpperCase()
+                                                        }
                                                     </div>
                                                     <span className="font-bold text-sm text-zinc-800 dark:text-zinc-100">{alert.name}</span>
                                                 </div>
                                             </td>
                                             <td className="px-6 py-4 text-center">
-                                                <span className="text-xs font-bold text-orange-600 bg-orange-50 dark:bg-orange-900/10 px-2.5 py-1 rounded-md">
+                                                <span className={`text-xs font-bold px-2.5 py-1 rounded-md ${alert.balance < 0
+                                                    ? "text-red-600 bg-red-50 dark:bg-red-900/10"
+                                                    : "text-orange-600 bg-orange-50 dark:bg-orange-900/10"}`}>
                                                     {alert.balance}h
                                                 </span>
+                                                {alert.highBalance && (
+                                                    <div className="text-[9px] font-black uppercase tracking-widest text-zinc-400 mt-1">Saldo alto</div>
+                                                )}
                                             </td>
                                             <td className="px-6 py-4 text-center">
-                                                <div className="flex flex-col items-center">
-                                                    <span className="text-xs font-bold text-zinc-500 dark:text-zinc-400">{alert.daysLeft} dias</span>
-                                                    <span className="text-[10px] text-zinc-400 uppercase tracking-widest font-black">Restantes</span>
-                                                </div>
+                                                {alert.expiring ? (
+                                                    <div className="flex flex-col items-center">
+                                                        <span className="text-xs font-bold text-zinc-500 dark:text-zinc-400">{alert.daysLeft} dias</span>
+                                                        <span className="text-[10px] text-zinc-400 uppercase tracking-widest font-black">Restantes</span>
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-xs text-zinc-400 italic">{formatDate(alert.expirationDate)}</span>
+                                                )}
                                             </td>
                                             <td className="px-6 py-4 text-right">
-                                                <button className="p-2 text-zinc-400 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded-md transition-all">
-                                                    <ArrowUpRight size={18} />
-                                                </button>
+                                                <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter ${alert.expiring
+                                                    ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400"
+                                                    : "bg-amber-50 text-amber-600 dark:bg-amber-900/20 dark:text-amber-400"}`}>
+                                                    <AlertTriangle size={11} />
+                                                    {alert.expiring ? "A vencer" : "Acúmulo"}
+                                                </span>
                                             </td>
                                         </tr>
                                     ))}

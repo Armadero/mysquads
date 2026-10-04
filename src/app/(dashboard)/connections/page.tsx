@@ -1,38 +1,49 @@
 "use client";
-import { useState, useEffect } from "react";
-import { Search, ArrowRight, ShieldCheck } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { useState, useEffect, useCallback } from "react";
+import { Search, ArrowRight, ShieldCheck, Users, Loader2 } from "lucide-react";
+import { useSession } from "@/lib/hooks/use-session";
+import { PageLoader, AccessDenied } from "@/components/ui/page-state";
+import { describeApiError } from "@/lib/utils";
+
+type Link = {
+    id: string;
+    status: "PENDING" | "APPROVED" | "REJECTED";
+    coordinator?: { id: string; name: string; email: string };
+};
+
+type Coordinator = { id: string; name: string; email: string };
 
 export default function ConnectionsPage() {
-    const supabase = createClient();
-    const [user, setUser] = useState<any>(null);
-    const [links, setLinks] = useState<{ id: string; status: string; coordinator?: { name: string; email: string } }[]>([]);
+    const { user, loading: sessionLoading } = useSession();
+    const [links, setLinks] = useState<Link[]>([]);
     const [search, setSearch] = useState("");
-    const [coordinators, setCoordinators] = useState<{ id: string; name: string; email: string }[]>([]);
+    const [coordinators, setCoordinators] = useState<Coordinator[]>([]);
+    const [searched, setSearched] = useState(false);
+    const [searching, setSearching] = useState(false);
     const [requestFeedback, setRequestFeedback] = useState<{ id: string; success: boolean; message: string } | null>(null);
 
-    useEffect(() => {
-        const fetchUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            setUser(user);
-        };
-        fetchUser();
-    }, [supabase.auth]);
+    const isManager = user?.type === "MANAGER";
 
-    useEffect(() => {
-        if (!user || user.user_metadata?.type !== "MANAGER") return;
-        fetchLinks();
-    }, [user]);
-
-    const fetchLinks = async () => {
+    const fetchLinks = useCallback(async () => {
         const res = await fetch("/api/links");
         if (res.ok) setLinks(await res.json());
-    };
+    }, []);
+
+    useEffect(() => {
+        if (!isManager) return;
+        fetchLinks();
+    }, [isManager, fetchLinks]);
 
     const searchCoordinators = async (e: React.FormEvent) => {
         e.preventDefault();
-        const res = await fetch(`/api/coordinators?q=${encodeURIComponent(search)}`);
-        if (res.ok) setCoordinators(await res.json());
+        setSearching(true);
+        try {
+            const res = await fetch(`/api/coordinators?q=${encodeURIComponent(search)}`);
+            if (res.ok) setCoordinators(await res.json());
+            setSearched(true);
+        } finally {
+            setSearching(false);
+        }
     };
 
     const requestLink = async (coordinatorId: string) => {
@@ -41,137 +52,203 @@ export default function ConnectionsPage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ coordinatorId }),
         });
+
         if (res.ok) {
-            setRequestFeedback({ id: coordinatorId, success: true, message: "Solicitação enviada com sucesso!" });
-            setTimeout(() => setRequestFeedback(null), 3000);
+            setRequestFeedback({ id: coordinatorId, success: true, message: "Solicitação enviada!" });
             fetchLinks();
         } else {
-            setRequestFeedback({ id: coordinatorId, success: false, message: "Falha na solicitação." });
-            setTimeout(() => setRequestFeedback(null), 3000);
+            // Antes qualquer falha virava "Falha na solicitação", escondendo o
+            // motivo real (ex.: já existe uma solicitação para este coordenador).
+            const data = await res.json().catch(() => ({}));
+            setRequestFeedback({
+                id: coordinatorId,
+                success: false,
+                message: describeApiError(data, "Falha na solicitação."),
+            });
         }
+        setTimeout(() => setRequestFeedback(null), 4000);
     };
 
-    if (!user || user.user_metadata?.type !== "MANAGER") return null;
+    if (sessionLoading) return <PageLoader label="Carregando conexões..." />;
+    if (!user) return null;
+    if (!isManager) {
+        return <AccessDenied message="Esta área está disponível apenas para gerentes." />;
+    }
 
-    const pendingConnections = links.filter(link => link.status !== 'APPROVED');
-    const activeConnections = links.filter(link => link.status === 'APPROVED');
+    const pendingConnections = links.filter(l => l.status !== "APPROVED");
+    const activeConnections = links.filter(l => l.status === "APPROVED");
+    // Um coordenador já solicitado não pode ser solicitado de novo.
+    const requestedIds = new Set(
+        links.filter(l => l.status !== "REJECTED").map(l => String(l.coordinator?.id))
+    );
+
+    const STATUS_BADGE: Record<string, { label: string; className: string }> = {
+        REJECTED: {
+            label: "Conexão recusada",
+            className: "bg-red-50 text-red-600 border-red-100 dark:bg-red-900/20 dark:text-red-400 dark:border-red-900/30",
+        },
+        PENDING: {
+            label: "Aguardando aprovação",
+            className: "bg-amber-50 text-amber-600 border-amber-100 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-900/30",
+        },
+    };
 
     return (
-        <div className="animate-in fade-in duration-500 w-full h-[calc(100vh-180px)] flex flex-col overflow-hidden">
-            {/* Header com estilo Modern SaaS */}
-            <div className="flex flex-col md:flex-row md:items-end justify-between border-b border-[#E2E8F0] pb-4 mb-4 gap-4 shrink-0">
+        <div className="space-y-8 animate-in fade-in duration-500 pb-20 font-sans">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-zinc-200 dark:border-zinc-800 pb-6">
                 <div>
-                    <h1 className="text-[24px] font-bold text-[#2D3E50] leading-tight">Coordenadores</h1>
-                    <p className="text-[14px] text-[#718096] mt-1 font-normal">Conecte-se com coordenadores para visualizar seus indicadores e squads.</p>
+                    <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Coordenadores</h1>
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                        Conecte-se com coordenadores para visualizar seus indicadores e squads.
+                    </p>
                 </div>
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-[#F5F7FA] rounded-[6px] text-[12px] font-medium text-[#4A5568] border border-[#E2E8F0]">
-                    <ShieldCheck size={14} className="text-[#4A90E2]" /> GERENCIAMENTO DE ACESSOS
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-bold text-zinc-500 uppercase tracking-tighter shadow-sm">
+                    <ShieldCheck size={14} className="text-blue-500" /> Gerenciamento de acessos
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch flex-1 min-h-0 overflow-hidden">
-                {/* Painel de busca: Soft White Card */}
-                <section className="lg:col-span-4 bg-white p-6 rounded-[6px] border border-[#E2E8F0] shadow-[0_2px_8px_rgba(0,0,0,0.05)] flex flex-col overflow-hidden">
-                    <h2 className="text-[18px] font-semibold text-[#2D3E50] mb-4 flex items-center gap-2 shrink-0">
-                        Conexão
-                    </h2>
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Busca */}
+                <section className="lg:col-span-4 bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm overflow-hidden">
+                    <div className="p-4 bg-zinc-50/50 dark:bg-zinc-800/30 border-b border-zinc-100 dark:border-zinc-800">
+                        <h2 className="font-bold text-xs uppercase tracking-wider text-zinc-500">Nova conexão</h2>
+                    </div>
 
-                    <form onSubmit={searchCoordinators} className="space-y-3 mb-6 shrink-0">
-                        <div>
-                            <label className="text-[12px] font-medium text-[#718096] mb-1.5 block uppercase tracking-wider">NOME DO COORDENADOR</label>
-                            <div className="relative">
-                                <input
-                                    type="text"
-                                    placeholder="Ex: Ana Silva..."
-                                    value={search}
-                                    onChange={e => setSearch(e.target.value)}
-                                    className="w-full bg-white border border-[#E2E8F0] p-2.5 rounded-[4px] text-[14px] text-[#4A5568] focus:outline-none focus:border-[#4A90E2] focus:ring-1 focus:ring-[#4A90E2]/20 transition-all placeholder:text-[#CBD5E0]"
-                                />
-                                <button type="submit" className="absolute right-2 top-1.5 p-1 text-[#718096] hover:text-[#4A90E2] transition-colors">
-                                    <Search size={18} />
-                                </button>
-                            </div>
-                        </div>
-                        <button type="submit" className="w-full bg-[#4A90E2] hover:bg-[#357ABD] text-white font-bold py-2.5 rounded-[6px] text-[12px] transition-all shadow-sm">
-                            BUSCAR AGORA
-                        </button>
-                    </form>
-
-                    <div className="space-y-3 overflow-y-auto pr-1 flex-1 custom-scrollbar">
-                        {coordinators.map(c => (
-                            <div key={c.id} className="p-4 border border-[#F1F5F9] rounded-[6px] hover:border-[#4A90E2]/20 hover:bg-[#F8FAFC] transition-all group">
-                                <div className="flex flex-col gap-3">
-                                    <div className="min-w-0">
-                                        <div className="font-semibold text-[14px] text-[#2D3E50]">{c.name}</div>
-                                        <div className="text-[12px] text-[#718096] truncate">{c.email}</div>
-                                    </div>
-                                    <button
-                                        onClick={() => requestLink(c.id)}
-                                        disabled={links.some(l => l.coordinator?.email === c.email)}
-                                        className="w-full py-1.5 text-[11px] font-bold text-[#4A90E2] border border-[#4A90E2]/10 rounded-[4px] hover:bg-[#4A90E2] hover:text-white transition-all disabled:opacity-20 flex items-center justify-center gap-2"
-                                    >
-                                        SOLICITAR ACESSO <ArrowRight size={12} />
-                                    </button>
+                    <div className="p-5 space-y-4">
+                        <form onSubmit={searchCoordinators} className="space-y-3">
+                            <div className="space-y-1.5">
+                                <label className="block text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+                                    Nome ou e-mail
+                                </label>
+                                <div className="relative">
+                                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                                    <input
+                                        type="text"
+                                        placeholder="Ex: Ana Silva..."
+                                        value={search}
+                                        onChange={e => setSearch(e.target.value)}
+                                        className="w-full pl-10 pr-3 py-2 text-sm bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                                    />
                                 </div>
-                                {requestFeedback?.id === c.id && (
-                                    <div className={`mt-2 text-[10px] font-bold text-center ${requestFeedback.success ? "text-[#48BB78]" : "text-[#F56565]"}`}>
-                                        {requestFeedback.message}
-                                    </div>
-                                )}
                             </div>
-                        ))}
-                        {coordinators.length === 0 && search && <div className="text-[#A0AEC0] text-[12px] text-center py-12 italic">Nenhum resultado.</div>}
-                        {!search && <div className="text-[#CBD5E0] text-[10px] font-medium uppercase tracking-widest text-center py-12 border-2 border-dashed border-[#F1F5F9] rounded-[6px]">Aguardando termo...</div>}
+                            <button
+                                type="submit"
+                                disabled={searching}
+                                className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2 rounded-lg text-sm transition-all shadow-md shadow-blue-500/10"
+                            >
+                                {searching ? <><Loader2 size={14} className="animate-spin" /> Buscando...</> : "Buscar"}
+                            </button>
+                        </form>
+
+                        <div className="space-y-2">
+                            {coordinators.map(c => {
+                                const alreadyRequested = requestedIds.has(String(c.id));
+                                return (
+                                    <div
+                                        key={c.id}
+                                        className="p-3 border border-zinc-100 dark:border-zinc-800 rounded-lg hover:border-blue-200 dark:hover:border-blue-900 hover:bg-zinc-50/50 dark:hover:bg-zinc-800/30 transition-all space-y-2"
+                                    >
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-sm text-zinc-800 dark:text-zinc-100 truncate">{c.name}</div>
+                                            <div className="text-xs text-zinc-500 truncate">{c.email}</div>
+                                        </div>
+                                        <button
+                                            onClick={() => requestLink(c.id)}
+                                            disabled={alreadyRequested}
+                                            className="w-full flex items-center justify-center gap-2 py-1.5 text-[11px] font-bold rounded-md border transition-all
+                                                border-blue-200 dark:border-blue-900 text-blue-600 dark:text-blue-400
+                                                hover:bg-blue-600 hover:text-white hover:border-blue-600
+                                                disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-blue-600"
+                                        >
+                                            {alreadyRequested ? "JÁ SOLICITADO" : <>SOLICITAR ACESSO <ArrowRight size={12} /></>}
+                                        </button>
+                                        {requestFeedback?.id === c.id && (
+                                            <div className={`text-[10px] font-bold text-center ${requestFeedback.success ? "text-green-600" : "text-red-500"}`}>
+                                                {requestFeedback.message}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+
+                            {searched && coordinators.length === 0 && (
+                                <p className="text-xs text-zinc-400 italic text-center py-8">Nenhum coordenador encontrado.</p>
+                            )}
+                            {!searched && (
+                                <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-300 dark:text-zinc-600 text-center py-8 border-2 border-dashed border-zinc-100 dark:border-zinc-800 rounded-lg">
+                                    Busque para começar
+                                </p>
+                            )}
+                        </div>
                     </div>
                 </section>
 
-                <div className="lg:col-span-8 flex flex-col gap-6 h-full overflow-hidden">
-                    {/* Ativos */}
-                    <section className="bg-white p-6 rounded-[6px] border border-[#E2E8F0] shadow-[0_2px_8px_rgba(0,0,0,0.05)] flex flex-col overflow-hidden min-h-0 flex-1">
-                        <div className="flex items-center justify-between mb-4 shrink-0">
-                            <h2 className="text-[18px] font-semibold text-[#2D3E50]">Meus Coordenadores</h2>
-                            <div className="px-2 py-0.5 bg-[#EBF8F2] text-[#48BB78] text-[10px] font-bold rounded-full">
-                                {activeConnections.length} ATIVOS
-                            </div>
+                {/* Conexões */}
+                <div className="lg:col-span-8 space-y-6">
+                    <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm overflow-hidden">
+                        <div className="p-4 bg-zinc-50/50 dark:bg-zinc-800/30 border-b border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
+                            <h2 className="font-bold text-xs uppercase tracking-wider text-zinc-500">Meus coordenadores</h2>
+                            <span className="text-[10px] font-black bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400 px-2 py-0.5 rounded-full border border-green-100 dark:border-green-900/30">
+                                {activeConnections.length} ativo(s)
+                            </span>
                         </div>
-                        <div className="space-y-4 overflow-y-auto pr-1 flex-1 custom-scrollbar">
+
+                        <div className="p-5 space-y-2">
                             {activeConnections.map(link => (
-                                <div key={link.id} className="p-4 bg-[#F5F7FA] border border-[#E2E8F0] rounded-[6px] flex items-center justify-between group hover:bg-white transition-all hover:shadow-sm">
-                                    <div className="flex items-center gap-4">
-                                        <div className="w-10 h-10 bg-white border border-[#E2E8F0] text-[#4A90E2] font-bold rounded-full flex items-center justify-center shadow-sm">
-                                            {link.coordinator?.name.charAt(0)}
+                                <div
+                                    key={link.id}
+                                    className="flex items-center justify-between gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/40 border border-zinc-100 dark:border-zinc-800 rounded-lg hover:bg-white dark:hover:bg-zinc-800 hover:shadow-sm transition-all"
+                                >
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        <div className="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 font-bold flex items-center justify-center shrink-0">
+                                            {link.coordinator?.name?.[0]?.toUpperCase() || "?"}
                                         </div>
-                                        <div>
-                                            <div className="font-semibold text-[14px] text-[#2D3E50]">{link.coordinator?.name}</div>
-                                            <div className="text-[12px] text-[#718096]">{link.coordinator?.email}</div>
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-sm text-zinc-800 dark:text-zinc-100 truncate">{link.coordinator?.name}</div>
+                                            <div className="text-xs text-zinc-500 truncate">{link.coordinator?.email}</div>
                                         </div>
                                     </div>
-                                    <span className="text-[10px] font-bold text-[#48BB78] italic">CONECTADO</span>
+                                    <span className="text-[10px] font-black uppercase tracking-tighter text-green-600 dark:text-green-400 shrink-0">
+                                        Conectado
+                                    </span>
                                 </div>
                             ))}
-                            {activeConnections.length === 0 && <div className="text-[#A0AEC0] text-[13px] text-center py-12 border-2 border-dashed border-[#F5F7FA] rounded-[6px]">Sem conexões aprovadas.</div>}
+
+                            {activeConnections.length === 0 && (
+                                <div className="py-14 text-center flex flex-col items-center">
+                                    <div className="w-14 h-14 bg-zinc-50 dark:bg-zinc-800 rounded-full flex items-center justify-center mb-3 text-zinc-300 dark:text-zinc-600">
+                                        <Users size={26} />
+                                    </div>
+                                    <p className="text-zinc-500 font-medium italic text-sm">Nenhuma conexão aprovada ainda.</p>
+                                    <p className="text-xs text-zinc-400 mt-1">Busque um coordenador ao lado e solicite acesso.</p>
+                                </div>
+                            )}
                         </div>
                     </section>
 
-                    {/* Pendentes/Rejeitadas - EXIBIR APENAS SE TIVER ITENS */}
                     {pendingConnections.length > 0 && (
-                        <section className="bg-white p-6 rounded-[6px] border border-[#E2E8F0] shadow-[0_2px_8px_rgba(0,0,0,0.05)] flex flex-col overflow-hidden min-h-0 max-h-[40%] shrink-0">
-                            <h2 className="text-[18px] font-semibold text-[#2D3E50] mb-4 shrink-0">Status de Solicitações</h2>
-                            <div className="space-y-4 overflow-y-auto pr-1 flex-1 custom-scrollbar">
-                                {pendingConnections.map(link => (
-                                    <div key={link.id} className="p-4 border border-[#F1F5F9] rounded-[6px] flex items-center justify-between bg-white text-zinc-800">
-                                        <div>
-                                            <div className="font-semibold text-[14px] text-[#2D3E50]">{link.coordinator?.name}</div>
-                                            <div className="text-[12px] text-[#718096]">{link.coordinator?.email}</div>
+                        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm overflow-hidden">
+                            <div className="p-4 bg-zinc-50/50 dark:bg-zinc-800/30 border-b border-zinc-100 dark:border-zinc-800">
+                                <h2 className="font-bold text-xs uppercase tracking-wider text-zinc-500">Status das solicitações</h2>
+                            </div>
+                            <div className="p-5 space-y-2">
+                                {pendingConnections.map(link => {
+                                    const badge = STATUS_BADGE[link.status] || STATUS_BADGE.PENDING;
+                                    return (
+                                        <div
+                                            key={link.id}
+                                            className="flex items-center justify-between gap-3 p-3 border border-zinc-100 dark:border-zinc-800 rounded-lg"
+                                        >
+                                            <div className="min-w-0">
+                                                <div className="font-bold text-sm text-zinc-800 dark:text-zinc-100 truncate">{link.coordinator?.name}</div>
+                                                <div className="text-xs text-zinc-500 truncate">{link.coordinator?.email}</div>
+                                            </div>
+                                            <span className={`shrink-0 text-[10px] font-black uppercase tracking-tighter px-2.5 py-1 rounded-md border ${badge.className}`}>
+                                                {badge.label}
+                                            </span>
                                         </div>
-                                        <div className={`text-[10px] font-bold px-3 py-1 rounded-[4px] border ${link.status === 'REJECTED'
-                                            ? 'bg-[#FFF5F5] text-[#F56565] border border-[#F56565]/10'
-                                            : 'bg-[#FFFAF0] text-[#ED8936] border border-[#ED8936]/10'
-                                            }`}>
-                                            {link.status === 'REJECTED' ? 'CONEXÃO RECUSADA' : 'EM PROCESSAMENTO'}
-                                        </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         </section>
                     )}

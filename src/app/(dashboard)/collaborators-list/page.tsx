@@ -1,52 +1,62 @@
 "use client";
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { ChevronLeft, Users, Gift, Cake, AlertTriangle, MoreHorizontal, Download, Mail, Bell } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { ChevronLeft, Users, Gift, Cake, AlertTriangle, Download } from "lucide-react";
+import { formatDate, formatDayMonth } from "@/lib/utils";
+import { useSession } from "@/lib/hooks/use-session";
+import { PageLoader } from "@/components/ui/page-state";
+import { roleLabel } from "@/lib/labels";
+
+const LIST_KEYS: Record<string, string> = {
+    "company-anniversary": "companyAnniversaries",
+    birthday: "birthdays",
+    "timebank-alerts": "expiringTimebank",
+};
 
 function CollaboratorsListContent() {
-    const supabase = createClient();
-    const [user, setUser] = useState<any>(null);
+    const { user, loading: sessionLoading } = useSession();
     const searchParams = useSearchParams();
     const router = useRouter();
     const type = searchParams.get("type");
     const [data, setData] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
 
-    useEffect(() => {
-        const fetchUser = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            setUser(user);
-        };
-        fetchUser();
-    }, [supabase.auth]);
-
-    useEffect(() => {
-        if (user && type) {
-            fetchListData();
-        }
-    }, [user, type]);
-
-    const fetchListData = async () => {
+    const fetchListData = useCallback(async () => {
         setLoading(true);
         try {
             const res = await fetch("/api/dashboard");
-            if (res.ok) {
-                const dashboard = await res.json();
-                const metrics = dashboard.metrics || (dashboard.managerMetrics?.[0]?.metrics);
+            if (!res.ok) return;
 
-                if (metrics) {
-                    if (type === "company-anniversary") setData(metrics.companyAnniversaries);
-                    else if (type === "birthday") setData(metrics.birthdays);
-                    else if (type === "timebank-alerts") setData(metrics.expiringTimebank);
-                }
-            }
+            const dashboard = await res.json();
+            const key = type ? LIST_KEYS[type] : undefined;
+            if (!key) return;
+
+            // Gerente vê a soma de TODOS os coordenadores vinculados.
+            // Antes só o primeiro (`managerMetrics[0]`) era considerado, então a
+            // listagem não batia com o total mostrado no card do painel.
+            const buckets: any[][] = dashboard.metrics
+                ? [dashboard.metrics[key] || []]
+                : (dashboard.managerMetrics || []).map((m: any) => m.metrics?.[key] || []);
+
+            setData(buckets.flat());
         } catch (error) {
             console.error("Error fetching list:", error);
         } finally {
             setLoading(false);
         }
-    };
+    }, [type]);
+
+    useEffect(() => {
+        if (!user) return;
+        // Sem `type` (ou com um valor desconhecido) não há o que buscar —
+        // antes o `loading` ficava travado em true e a tela girava para sempre.
+        if (!type || !LIST_KEYS[type]) {
+            setData([]);
+            setLoading(false);
+            return;
+        }
+        fetchListData();
+    }, [user, type, fetchListData]);
 
     const handleExportCSV = () => {
         if (data.length === 0) return;
@@ -54,22 +64,23 @@ function CollaboratorsListContent() {
         // Headers
         const headers = ["Nome", "Cargo", "Equipe/Squads", "Informação", "Endereço de Entrega"];
 
-        // Rows
+        // Rows — `String(val ?? "")` porque qualquer campo nulo (endereço,
+        // cargo, data) derrubava o export com "Cannot read properties of null".
         const rows = data.map(item => {
             const squads = item.squads?.map((s: any) => s?.name).filter(Boolean).join(", ") || "Nenhum";
             const info = type === "timebank-alerts"
                 ? `${item.balance}h (em ${item.daysLeft}d)`
                 : type === "company-anniversary"
-                    ? new Date(item.admissionDate).toLocaleDateString('pt-BR')
-                    : new Date(item.birthDate).toLocaleDateString('pt-BR');
+                    ? formatDate(item.admissionDate)
+                    : formatDate(item.birthDate);
 
             return [
                 item.name,
-                item.role?.name || "Sem cargo",
+                roleLabel(item.role?.name),
                 squads,
                 info,
                 item.deliveryAddress || "Não informado"
-            ].map(val => `"${val.toString().replace(/"/g, '""')}"`).join(",");
+            ].map(val => `"${String(val ?? "").replace(/"/g, '""')}"`).join(",");
         });
 
         const csvContent = "\uFEFF" + [headers.join(","), ...rows].join("\n");
@@ -99,13 +110,7 @@ function CollaboratorsListContent() {
 
     const info = getHeaderInfo();
 
-    if (loading) {
-        return (
-            <div className="flex items-center justify-center py-20">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            </div>
-        );
-    }
+    if (sessionLoading || loading) return <PageLoader label="Carregando lista..." />;
 
     return (
         <div className="space-y-6">
@@ -142,16 +147,20 @@ function CollaboratorsListContent() {
                             <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-zinc-500">Cargo</th>
                             <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-zinc-500">Equipe / Squads</th>
                             <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-zinc-500">{type === "timebank-alerts" ? "Saldo / Prazo" : "Data"}</th>
-                            <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-zinc-500 text-right">Ações</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-50 dark:divide-zinc-800/50">
-                        {data.map((item) => (
-                            <tr key={item.id} className="group hover:bg-zinc-50/50 dark:hover:bg-zinc-800/20 transition-colors">
+                        {/* A chave inclui o índice: em "alertas de banco" o mesmo
+                            colaborador aparece uma vez por lançamento a vencer,
+                            então `item.id` sozinho se repetia. */}
+                        {data.map((item, i) => (
+                            <tr key={`${item.id}-${i}`} className="group hover:bg-zinc-50/50 dark:hover:bg-zinc-800/20 transition-colors">
                                 <td className="px-6 py-4">
                                     <div className="flex items-center gap-3">
                                         {item.photoUrl ? (
-                                            <img src={item.photoUrl} alt={item.name} className="w-8 h-8 rounded-full object-cover border border-zinc-200 dark:border-zinc-700" />
+                                            <div className="w-8 h-8 rounded-full overflow-hidden flex-shrink-0 border border-zinc-200 dark:border-zinc-700">
+                                                <img src={item.photoUrl} alt={item.name} className="w-full h-full object-cover object-top" />
+                                            </div>
                                         ) : (
                                             <div className="w-8 h-8 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-[10px] font-bold text-zinc-500">
                                                 {item.name.substring(0, 2).toUpperCase()}
@@ -161,7 +170,7 @@ function CollaboratorsListContent() {
                                     </div>
                                 </td>
                                 <td className="px-6 py-4">
-                                    <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">{item.role?.name || "Sem cargo"}</span>
+                                    <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">{roleLabel(item.role?.name)}</span>
                                 </td>
                                 <td className="px-6 py-4">
                                     <div className="flex flex-wrap gap-1">
@@ -185,30 +194,17 @@ function CollaboratorsListContent() {
                                     ) : (
                                         <span className="text-xs font-bold text-zinc-500">
                                             {type === "company-anniversary"
-                                                ? new Date(item.admissionDate).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
-                                                : new Date(item.birthDate).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+                                                ? formatDate(item.admissionDate)
+                                                : formatDayMonth(item.birthDate)
                                             }
                                         </span>
                                     )}
-                                </td>
-                                <td className="px-6 py-4 text-right">
-                                    <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                        <button title="Enviar Notificação" className="p-2 text-zinc-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-all">
-                                            <Bell size={14} />
-                                        </button>
-                                        <button title="Enviar E-mail" className="p-2 text-zinc-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-all">
-                                            <Mail size={14} />
-                                        </button>
-                                        <button title="Mais Opções" className="p-2 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-all">
-                                            <MoreHorizontal size={14} />
-                                        </button>
-                                    </div>
                                 </td>
                             </tr>
                         ))}
                         {data.length === 0 && (
                             <tr>
-                                <td colSpan={5} className="py-20 text-center">
+                                <td colSpan={4} className="py-20 text-center">
                                     <div className="flex flex-col items-center justify-center gap-2">
                                         <Users size={40} className="text-zinc-200 dark:text-zinc-800" />
                                         <div className="text-zinc-400 dark:text-zinc-600 italic text-sm font-medium">Nenhum colaborador nesta lista.</div>

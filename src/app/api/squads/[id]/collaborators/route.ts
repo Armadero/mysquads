@@ -1,129 +1,95 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { queryOne, execute, transaction } from "@/lib/db";
+import { IdSchema } from "@/lib/schemas";
+import { handleApiError, notFound } from "@/lib/api/responses";
+import { requireCoordinator } from "@/lib/auth/guards";
+import { z } from "zod";
 
-export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+type RouteContext = { params: Promise<{ id: string }> };
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { collaboratorIds } = await req.json(); // Array of strings
-
-    // Verify squad belongs to coordinator
-    const { data: squad, error: squadError } = await supabase
-        .from("Squad")
-        .select("id")
-        .eq("id", id)
-        .eq("coordinatorId", user.id)
-        .single();
-
-    if (squadError || !squad) {
-        return NextResponse.json({ error: "Squad not found" }, { status: 404 });
-    }
-
-    // Replace members
-    const { error: deleteError } = await supabase
-        .from("SquadCollaborator")
-        .delete()
-        .eq("squadId", id);
-
-    if (deleteError) {
-        console.error("[PUT /api/squads/:id/collaborators] deleteError", deleteError);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-    }
-
-    if (collaboratorIds && collaboratorIds.length > 0) {
-        const inserts = collaboratorIds.map((collabId: string) => ({
-            squadId: id,
-            collaboratorId: collabId
-        }));
-
-        const { error: insertError } = await supabase
-            .from("SquadCollaborator")
-            .insert(inserts);
-
-        if (insertError) {
-            console.error("[PUT /api/squads/:id/collaborators] insertError", insertError);
-            return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-        }
-    }
-
-    return NextResponse.json({ success: true });
+function assertSquadOwnership(squadId: string, coordinatorId: string) {
+    const squad = queryOne<{ id: number }>(
+        "SELECT id FROM Squad WHERE id = ? AND coordinatorId = ?",
+        [squadId, coordinatorId]
+    );
+    return !!squad;
 }
 
-export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+const ReplaceSchema = z.object({
+    collaboratorIds: z.array(IdSchema).default([]),
+});
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+const SingleSchema = z.object({
+    collaboratorId: IdSchema,
+});
+
+// PUT: replace the full set of collaborators on a squad
+export async function PUT(req: Request, { params }: RouteContext) {
+    try {
+        const session = await requireCoordinator();
+        const { id } = await params;
+
+        if (!assertSquadOwnership(id, session.sub))
+            return notFound("Squad not found");
+
+        const { collaboratorIds } = ReplaceSchema.parse(await req.json());
+
+        transaction(() => {
+            execute("DELETE FROM SquadCollaborator WHERE squadId = ?", [id]);
+            for (const collabId of collaboratorIds) {
+                execute(
+                    "INSERT INTO SquadCollaborator (squadId, collaboratorId) VALUES (?, ?)",
+                    [id, collabId]
+                );
+            }
+        });
+
+        return NextResponse.json({ success: true });
+    } catch (err) {
+        return handleApiError("PUT /api/squads/:id/collaborators", err);
     }
-
-    const { collaboratorId } = await req.json();
-
-    // Verify squad belongs to coordinator
-    const { data: squad, error: squadError } = await supabase
-        .from("Squad")
-        .select("id")
-        .eq("id", id)
-        .eq("coordinatorId", user.id)
-        .single();
-
-    if (squadError || !squad) {
-        return NextResponse.json({ error: "Squad not found" }, { status: 404 });
-    }
-
-    // Add collaborator if not already in squad
-    const { data: existing } = await supabase
-        .from("SquadCollaborator")
-        .select("id")
-        .eq("squadId", id)
-        .eq("collaboratorId", collaboratorId)
-        .single();
-
-    if (!existing) {
-        const { error: insertError } = await supabase
-            .from("SquadCollaborator")
-            .insert({
-                squadId: id,
-                collaboratorId
-            });
-
-        if (insertError) {
-            console.error("[POST /api/squads/:id/collaborators] insertError", insertError);
-            return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
-        }
-    }
-
-    // You can fetch and return the assignment if needed, we'll return a simple success
-    return NextResponse.json({ success: true });
 }
 
-export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+// POST: add a single collaborator (no-op if already assigned)
+export async function POST(req: Request, { params }: RouteContext) {
+    try {
+        const session = await requireCoordinator();
+        const { id } = await params;
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        if (!assertSquadOwnership(id, session.sub))
+            return notFound("Squad not found");
+
+        const { collaboratorId } = SingleSchema.parse(await req.json());
+
+        execute(
+            "INSERT OR IGNORE INTO SquadCollaborator (squadId, collaboratorId) VALUES (?, ?)",
+            [id, collaboratorId]
+        );
+
+        return NextResponse.json({ success: true });
+    } catch (err) {
+        return handleApiError("POST /api/squads/:id/collaborators", err);
     }
+}
 
-    const { collaboratorId } = await req.json();
+// DELETE: remove a collaborator
+export async function DELETE(req: Request, { params }: RouteContext) {
+    try {
+        const session = await requireCoordinator();
+        const { id } = await params;
 
-    const { error } = await supabase
-        .from("SquadCollaborator")
-        .delete()
-        .eq("squadId", id)
-        .eq("collaboratorId", collaboratorId);
+        if (!assertSquadOwnership(id, session.sub))
+            return notFound("Squad not found");
 
-    if (error) {
-        console.error("[DELETE /api/squads/:id/collaborators]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        const { collaboratorId } = SingleSchema.parse(await req.json());
+
+        execute(
+            "DELETE FROM SquadCollaborator WHERE squadId = ? AND collaboratorId = ?",
+            [id, collaboratorId]
+        );
+
+        return NextResponse.json({ success: true });
+    } catch (err) {
+        return handleApiError("DELETE /api/squads/:id/collaborators", err);
     }
-
-    return NextResponse.json({ success: true });
 }

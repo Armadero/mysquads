@@ -1,86 +1,88 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { queryAll, queryOne } from "@/lib/db";
 import { CollaboratorSchema } from "@/lib/schemas";
-import { z } from "zod";
+import { insertCollaborator } from "@/lib/db/collaborators";
+import { badRequest, handleApiError } from "@/lib/api/responses";
+import {
+    requireCoordinator,
+    requireUser,
+    resolveReadableCoordinatorIds,
+} from "@/lib/auth/guards";
+
+interface CollaboratorRow {
+    id: number | string;
+    role: string | null;
+    [key: string]: unknown;
+}
 
 export async function GET() {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    try {
+        const session = await requireUser();
+        const coordinatorIds = resolveReadableCoordinatorIds(session);
+        if (coordinatorIds.length === 0) return NextResponse.json([]);
 
-    let coordinatorIds: string[] = [];
+        const placeholders = coordinatorIds.map(() => "?").join(",");
 
-    if (user.user_metadata?.type === "COORDINATOR") {
-        coordinatorIds = [user.id];
-    } else if (user.user_metadata?.type === "MANAGER") {
-        const { data: links } = await supabase
-            .from('ManagerCoordinatorLink')
-            .select('coordinatorId')
-            .eq('managerId', user.id)
-            .eq('status', 'APPROVED');
-        coordinatorIds = links?.map((link: any) => link.coordinatorId) || [];
-    } else {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        // Pull collaborators + their related squads and events in ONE query per
+        // category using a group_concat, avoiding the old N+1 pattern.
+        const collabs = queryAll<CollaboratorRow>(
+            `SELECT
+                c.*,
+                CASE WHEN r.id IS NOT NULL
+                     THEN json_object(
+                        'id', r.id, 'name', r.name, 'defaultColor', r.defaultColor,
+                        'maxSquads', r.maxSquads, 'multipleSquads', r.multipleSquads,
+                        'order', r."order"
+                     )
+                     ELSE NULL
+                END AS role,
+                (SELECT json_group_array(json_object('squadId', sc.squadId))
+                   FROM SquadCollaborator sc WHERE sc.collaboratorId = c.id) AS squads,
+                (SELECT json_group_array(json_object('eventId', iec.eventId))
+                   FROM IntegrationEventCollaborator iec WHERE iec.collaboratorId = c.id) AS events
+             FROM Collaborator c
+             LEFT JOIN Role r ON c.roleId = r.id
+             WHERE c.coordinatorId IN (${placeholders})`,
+            coordinatorIds
+        );
+
+        const parsed = collabs.map((c) => ({
+            ...c,
+            role: c.role ? JSON.parse(c.role as string) : null,
+            squads: c.squads ? JSON.parse(c.squads as string) : [],
+            events: c.events ? JSON.parse(c.events as string) : [],
+        }));
+
+        return NextResponse.json(parsed);
+    } catch (err) {
+        return handleApiError("GET /api/collaborators", err);
     }
-
-    if (coordinatorIds.length === 0) {
-        return NextResponse.json([]);
-    }
-
-    const { data: collabs } = await supabase
-        .from('Collaborator')
-        .select(`
-            *,
-            role:Role(id, name, defaultColor),
-            squads:SquadMember(squadId),
-            events:CollaboratorEvent(eventId)
-        `)
-        .in('coordinatorId', coordinatorIds);
-
-    return NextResponse.json(collabs || []);
 }
 
 export async function POST(req: Request) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
     try {
-        const data = await req.json();
-        const parsed = CollaboratorSchema.parse(data);
-        const { email: collabEmail, roleId, matricula, ...rest } = parsed;
+        const session = await requireCoordinator();
+        const parsed = CollaboratorSchema.parse(await req.json());
 
-        const insertData = {
-            ...rest,
-            email: collabEmail ?? null,
-            matricula: matricula || null,
-            coordinatorId: user.id,
-            admissionDate: new Date(parsed.admissionDate).toISOString(),
-            birthDate: parsed.birthDate ? new Date(parsed.birthDate).toISOString() : null,
-            resignationDate: parsed.resignationDate ? new Date(parsed.resignationDate).toISOString() : null,
-            roleId: roleId as string
-        };
-
-        const { data: collab, error } = await supabase
-            .from('Collaborator')
-            .insert(insertData)
-            .select()
-            .single();
-
-        if (error) {
-            if (error.code === '23505' && error.message.includes('matricula')) {
-                return NextResponse.json({ error: "Esta matrícula já está em uso por outro colaborador." }, { status: 400 });
+        if (parsed.matricula) {
+            const dup = queryOne(
+                `SELECT id FROM Collaborator WHERE matricula = ?`,
+                [parsed.matricula]
+            );
+            if (dup) {
+                return badRequest(
+                    "Esta matrícula já está em uso por outro colaborador."
+                );
             }
-            throw error;
         }
 
+        const { lastInsertRowid } = insertCollaborator(parsed, session.sub);
+        const collab = queryOne(
+            `SELECT * FROM Collaborator WHERE id = ?`,
+            [Number(lastInsertRowid)]
+        );
         return NextResponse.json(collab, { status: 201 });
-    } catch (error: any) {
-        if (error instanceof z.ZodError)
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        console.error("[POST /api/collaborators]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("POST /api/collaborators", err);
     }
 }

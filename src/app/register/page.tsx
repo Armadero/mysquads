@@ -3,7 +3,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { User, Mail, Lock, Loader2, ShieldCheck } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
 
 export default function RegisterPage() {
     const router = useRouter();
@@ -13,7 +12,6 @@ export default function RegisterPage() {
     const [type, setType] = useState("COORDINATOR");
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
-    const supabase = createClient();
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -21,26 +19,24 @@ export default function RegisterPage() {
         setError("");
 
         try {
-            const { data, error } = await supabase.auth.signUp({
-                email,
-                password,
-                options: {
-                    data: {
-                        name,
-                        type,
-                    }
-                }
+            const res = await fetch("/api/auth/register", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email, password, name, type }),
             });
 
-            if (error) {
-                throw new Error(error.message || "Falha ao criar conta");
+            const data = await res.json();
+
+            if (!res.ok) {
+                setError(data.error || "Falha ao criar conta.");
+                setLoading(false);
+                return;
             }
 
-            // Supabase Auth Automatically logs them in if email confirmations are disabled.
             router.push("/dashboard");
             router.refresh();
-        } catch (err: any) {
-            setError(err.message);
+        } catch {
+            setError("Erro ao conectar. Tente novamente.");
             setLoading(false);
         }
     };

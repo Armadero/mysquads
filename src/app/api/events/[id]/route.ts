@@ -1,85 +1,67 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { execute, transaction } from "@/lib/db";
 import { EventSchema } from "@/lib/schemas";
-import { z } from "zod";
+import { handleApiError, notFound } from "@/lib/api/responses";
+import { requireCoordinator } from "@/lib/auth/guards";
 
-export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+type RouteContext = { params: Promise<{ id: string }> };
 
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
+export async function PUT(req: Request, { params }: RouteContext) {
     try {
-        const data = await req.json();
-        const parsed = EventSchema.parse(data);
+        const session = await requireCoordinator();
+        const { id } = await params;
+        const parsed = EventSchema.parse(await req.json());
 
-        // Update basic info
-        const { error: eventError } = await supabase
-            .from("IntegrationEvent")
-            .update({
-                startDate: new Date(parsed.startDate).toISOString(),
-                endDate: new Date(parsed.endDate).toISOString(),
-            })
-            .eq("id", id)
-            .eq("coordinatorId", user.id); // Security: must be owner
+        let changes = 0;
 
-        if (eventError) throw eventError;
+        transaction(() => {
+            const result = execute(
+                `UPDATE IntegrationEvent
+                 SET startDate = ?, endDate = ?, updated_at = datetime('now')
+                 WHERE id = ? AND coordinatorId = ?`,
+                [
+                    new Date(parsed.startDate).toISOString(),
+                    new Date(parsed.endDate).toISOString(),
+                    id,
+                    session.sub,
+                ]
+            );
+            changes = result.changes;
+            if (changes === 0) return;
 
-        // Sync collaborators
-        const { error: deleteError } = await supabase
-            .from("IntegrationEventCollaborator")
-            .delete()
-            .eq("eventId", id);
+            execute(
+                "DELETE FROM IntegrationEventCollaborator WHERE eventId = ?",
+                [id]
+            );
+            for (const collabId of parsed.collaboratorIds) {
+                execute(
+                    `INSERT INTO IntegrationEventCollaborator (eventId, collaboratorId)
+                     VALUES (?, ?)`,
+                    [id, collabId]
+                );
+            }
+        });
 
-        if (deleteError) throw deleteError;
-
-        if (parsed.collaboratorIds.length > 0) {
-            const inserts = parsed.collaboratorIds.map((collabId: string) => ({
-                eventId: id,
-                collaboratorId: collabId
-            }));
-
-            const { error: insertError } = await supabase
-                .from("IntegrationEventCollaborator")
-                .insert(inserts);
-
-            if (insertError) throw insertError;
-        }
-
+        if (changes === 0) return notFound("Event not found");
         return NextResponse.json({ success: true });
-    } catch (error: any) {
-        if (error instanceof z.ZodError) {
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        }
-        console.error("[PUT /api/events/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("PUT /api/events/:id", err);
     }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
+export async function DELETE(_req: Request, { params }: RouteContext) {
     try {
-        // If ON DELETE CASCADE is set in Supabase, this single call is enough.
-        const { error } = await supabase
-            .from("IntegrationEvent")
-            .delete()
-            .eq("id", id)
-            .eq("coordinatorId", user.id);
+        const session = await requireCoordinator();
+        const { id } = await params;
 
-        if (error) throw error;
+        const { changes } = execute(
+            "DELETE FROM IntegrationEvent WHERE id = ? AND coordinatorId = ?",
+            [id, session.sub]
+        );
+        if (changes === 0) return notFound("Event not found");
+
         return NextResponse.json({ success: true });
-    } catch (error: any) {
-        console.error("[DELETE /api/events/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("DELETE /api/events/:id", err);
     }
 }

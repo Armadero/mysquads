@@ -1,103 +1,111 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { z } from "zod";
+import { queryAll, queryOne, execute } from "@/lib/db";
+import { LinkRequestSchema, LinkUpdateSchema } from "@/lib/schemas";
+import { handleApiError, notFound, badRequest } from "@/lib/api/responses";
+import {
+    requireCoordinator,
+    requireManager,
+    requireUser,
+} from "@/lib/auth/guards";
 
-const LinkRequestSchema = z.object({
-    coordinatorId: z.string().min(1, "Coordinator ID is required"),
-});
-
-const LinkUpdateSchema = z.object({
-    id: z.string().min(1),
-    status: z.enum(["APPROVED", "REJECTED"]),
-});
+interface LinkRow {
+    id: number;
+    coordinator?: string;
+    manager?: string;
+    [key: string]: unknown;
+}
 
 export async function POST(req: Request) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "MANAGER")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
     try {
-        const data = await req.json();
-        const parsed = LinkRequestSchema.parse(data);
+        const session = await requireManager();
+        const parsed = LinkRequestSchema.parse(await req.json());
 
-        const { data: link, error } = await supabase
-            .from('ManagerCoordinatorLink')
-            .insert({
-                managerId: user.id,
-                coordinatorId: parsed.coordinatorId
-            })
-            .select()
-            .single();
+        // Prevent duplicate pending/approved request
+        const existing = queryOne<{ id: number; status: string }>(
+            `SELECT id, status FROM ManagerCoordinatorLink
+             WHERE managerId = ? AND coordinatorId = ?`,
+            [session.sub, parsed.coordinatorId]
+        );
+        if (existing && existing.status !== "REJECTED") {
+            return badRequest("Link request already exists");
+        }
 
-        if (error) throw error;
+        const result = execute(
+            `INSERT INTO ManagerCoordinatorLink (managerId, coordinatorId, status)
+             VALUES (?, ?, 'PENDING')`,
+            [session.sub, parsed.coordinatorId]
+        );
+
+        const link = queryOne(
+            "SELECT * FROM ManagerCoordinatorLink WHERE id = ?",
+            [Number(result.lastInsertRowid)]
+        );
 
         return NextResponse.json(link, { status: 201 });
-    } catch (error: unknown) {
-        if (error instanceof z.ZodError)
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        // Silently handle duplicate link (unique constraint violation)
-        return NextResponse.json({ error: "Already requested or error" }, { status: 400 });
+    } catch (err) {
+        return handleApiError("POST /api/links", err);
     }
 }
 
 export async function GET() {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    try {
+        const session = await requireUser();
 
-    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        if (session.type === "MANAGER") {
+            const links = queryAll<LinkRow>(
+                `SELECT l.*, json_object('id', u.id, 'name', u.name, 'email', u.email) as coordinator
+                 FROM ManagerCoordinatorLink l
+                 JOIN User u ON l.coordinatorId = u.id
+                 WHERE l.managerId = ?`,
+                [session.sub]
+            );
 
-    if (user.user_metadata?.type === "MANAGER") {
-        const { data: links } = await supabase
-            .from('ManagerCoordinatorLink')
-            .select(`
-                *,
-                coordinator:User!coordinatorId(id, name, email)
-            `)
-            .eq('managerId', user.id);
+            return NextResponse.json(
+                links.map((l) => ({
+                    ...l,
+                    coordinator: l.coordinator ? JSON.parse(l.coordinator) : null,
+                }))
+            );
+        }
 
-        return NextResponse.json(links || []);
-    } else {
-        const { data: links } = await supabase
-            .from('ManagerCoordinatorLink')
-            .select(`
-                *,
-                manager:User!managerId(id, name, email)
-            `)
-            .eq('coordinatorId', user.id)
-            .eq('status', 'PENDING');
+        const links = queryAll<LinkRow>(
+            `SELECT l.*, json_object('id', u.id, 'name', u.name, 'email', u.email) as manager
+             FROM ManagerCoordinatorLink l
+             JOIN User u ON l.managerId = u.id
+             WHERE l.coordinatorId = ? AND l.status = 'PENDING'`,
+            [session.sub]
+        );
 
-        return NextResponse.json(links || []);
+        return NextResponse.json(
+            links.map((l) => ({
+                ...l,
+                manager: l.manager ? JSON.parse(l.manager) : null,
+            }))
+        );
+    } catch (err) {
+        return handleApiError("GET /api/links", err);
     }
 }
 
 export async function PUT(req: Request) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
     try {
-        const data = await req.json();
-        const parsed = LinkUpdateSchema.parse(data);
+        const session = await requireCoordinator();
+        const parsed = LinkUpdateSchema.parse(await req.json());
 
-        const { data: link, error } = await supabase
-            .from('ManagerCoordinatorLink')
-            .update({ status: parsed.status })
-            .eq('id', parsed.id)
-            .eq('coordinatorId', user.id)
-            .select()
-            .single();
+        const { changes } = execute(
+            `UPDATE ManagerCoordinatorLink
+             SET status = ?
+             WHERE id = ? AND coordinatorId = ?`,
+            [parsed.status, parsed.id, session.sub]
+        );
+        if (changes === 0) return notFound("Link not found");
 
-        if (error) throw error;
-
+        const link = queryOne(
+            "SELECT * FROM ManagerCoordinatorLink WHERE id = ? AND coordinatorId = ?",
+            [parsed.id, session.sub]
+        );
         return NextResponse.json(link);
-    } catch (error: unknown) {
-        if (error instanceof z.ZodError)
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        console.error("[PUT /api/links]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("PUT /api/links", err);
     }
 }

@@ -1,92 +1,82 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { queryAll, execute } from "@/lib/db";
 import { FeedbackSchema } from "@/lib/schemas";
-import { z } from "zod";
+import { handleApiError } from "@/lib/api/responses";
+import {
+    requireCoordinator,
+    requireUser,
+    resolveReadableCoordinatorIds,
+} from "@/lib/auth/guards";
+
+interface FeedbackRow {
+    id: number;
+    collaborator: string;
+    coordinator: string;
+    [key: string]: unknown;
+}
 
 export async function GET() {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || (user.user_metadata?.type !== "COORDINATOR" && user.user_metadata?.type !== "MANAGER"))
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
     try {
-        let feedbacks = [];
+        const session = await requireUser();
+        const coordinatorIds = resolveReadableCoordinatorIds(session);
+        if (coordinatorIds.length === 0) return NextResponse.json([]);
 
-        if (user.user_metadata?.type === "COORDINATOR") {
-            const { data } = await supabase
-                .from('Feedback')
-                .select(`
-                    *,
-                    collaborator:Collaborator!collaboratorId(id, name, photoUrl, role:Role(name)),
-                    coordinator:User!coordinatorId(name)
-                `)
-                .eq('coordinatorId', user.id)
-                .order('date', { ascending: false });
-            feedbacks = data || [];
-        } else {
-            // MANAGER: Find approved coordinators
-            const { data: links } = await supabase
-                .from('ManagerCoordinatorLink')
-                .select('coordinatorId')
-                .eq('managerId', user.id)
-                .eq('status', 'APPROVED');
+        const placeholders = coordinatorIds.map(() => "?").join(",");
 
-            const coordinatorIds = links?.map(l => l.coordinatorId) || [];
+        const feedbacks = queryAll<FeedbackRow>(
+            `SELECT f.*,
+                    json_object(
+                        'id', c.id, 'name', c.name, 'photoUrl', c.photoUrl,
+                        'role', CASE WHEN r.id IS NOT NULL THEN json_object('name', r.name) ELSE NULL END
+                    ) as collaborator,
+                    json_object('name', u.name) as coordinator
+             FROM Feedback f
+             JOIN Collaborator c ON f.collaboratorId = c.id
+             LEFT JOIN Role r ON c.roleId = r.id
+             JOIN User u ON f.coordinatorId = u.id
+             WHERE f.coordinatorId IN (${placeholders})
+             ORDER BY f.date DESC`,
+            coordinatorIds
+        );
 
-            if (coordinatorIds.length > 0) {
-                const { data } = await supabase
-                    .from('Feedback')
-                    .select(`
-                        *,
-                        collaborator:Collaborator!collaboratorId(id, name, photoUrl, role:Role(name)),
-                        coordinator:User!coordinatorId(name)
-                    `)
-                    .in('coordinatorId', coordinatorIds)
-                    .order('date', { ascending: false });
-                feedbacks = data || [];
-            }
-        }
-
-        return NextResponse.json(feedbacks);
-    } catch (error) {
-        console.error("[GET /api/feedback]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+        return NextResponse.json(
+            feedbacks.map((f) => ({
+                ...f,
+                collaborator: JSON.parse(f.collaborator),
+                coordinator: JSON.parse(f.coordinator),
+            }))
+        );
+    } catch (err) {
+        return handleApiError("GET /api/feedback", err);
     }
 }
 
 export async function POST(req: Request) {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR")
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
     try {
-        const data = await req.json();
-        const parsed = FeedbackSchema.parse(data);
+        const session = await requireCoordinator();
+        const parsed = FeedbackSchema.parse(await req.json());
 
-        const { data: feedback, error } = await supabase
-            .from('Feedback')
-            .insert({
-                date: new Date(parsed.date).toISOString(),
-                content: parsed.content,
-                tag: parsed.tag,
-                type: parsed.type,
-                origin: parsed.origin,
-                collaboratorId: parsed.collaboratorId,
-                coordinatorId: user.id
-            })
-            .select()
-            .single();
+        const result = execute(
+            `INSERT INTO Feedback (date, content, tag, type, origin, collaboratorId, coordinatorId)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                new Date(parsed.date).toISOString(),
+                parsed.content,
+                parsed.tag ?? null,
+                parsed.type,
+                parsed.origin,
+                parsed.collaboratorId,
+                session.sub,
+            ]
+        );
 
-        if (error) throw error;
+        const feedback = queryAll(
+            "SELECT * FROM Feedback WHERE id = ?",
+            [Number(result.lastInsertRowid)]
+        )[0];
 
         return NextResponse.json(feedback, { status: 201 });
-    } catch (error: unknown) {
-        if (error instanceof z.ZodError)
-            return NextResponse.json({ error: "Erro de Validação", details: error.issues }, { status: 400 });
-        console.error("[POST /api/feedback]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("POST /api/feedback", err);
     }
 }

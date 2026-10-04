@@ -1,86 +1,72 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { z } from "zod";
+import { queryOne, execute } from "@/lib/db";
+import { RoleSchema } from "@/lib/schemas";
+import { badRequest, handleApiError, notFound } from "@/lib/api/responses";
+import { requireCoordinator } from "@/lib/auth/guards";
 
-const RoleTypeEnum = z.enum([
-    "SCRUM_MASTER",
-    "SYSTEM_ANALYST",
-    "PRODUCT_OWNER",
-    "DEVELOPER",
-    "QA_ANALYST",
-    "SPECIALIST",
-    "BUSINESS_ANALYST",
-    "PRODUCT_MANAGER"
-]);
+type RouteContext = { params: Promise<{ id: string }> };
 
-const RoleUpdateSchema = z.object({
-    name: RoleTypeEnum,
-    defaultColor: z.string().optional(),
-    qtyPerSquad: z.number().int().min(1).default(1),
-    maxSquads: z.number().int().min(1).optional(),
-    multipleSquads: z.boolean().optional().default(false),
-    order: z.number().int().optional().default(0),
-});
-
-export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
+export async function PUT(req: Request, { params }: RouteContext) {
     try {
-        const data = await req.json();
-        const parsed = RoleUpdateSchema.parse(data);
+        const session = await requireCoordinator();
+        const { id } = await params;
+        const parsed = RoleSchema.parse(await req.json());
 
-        const { data: role, error } = await supabase
-            .from("Role")
-            .update({
-                name: parsed.name,
-                defaultColor: parsed.defaultColor,
-                qtyPerSquad: parsed.qtyPerSquad,
-                maxSquads: parsed.maxSquads,
-                multipleSquads: parsed.multipleSquads,
-                order: parsed.order,
-            })
-            .eq("id", id)
-            .eq("coordinatorId", user.id) // RLS handles this, but explicit is good
-            .select()
-            .single();
+        const { changes } = execute(
+            `UPDATE Role
+             SET name = ?, defaultColor = ?, qtyPerSquad = ?, maxSquads = ?,
+                 multipleSquads = ?, "order" = ?
+             WHERE id = ? AND coordinatorId = ?`,
+            [
+                parsed.name,
+                parsed.defaultColor ?? null,
+                parsed.qtyPerSquad,
+                parsed.maxSquads,
+                parsed.multipleSquads ? 1 : 0,
+                parsed.order,
+                id,
+                session.sub,
+            ]
+        );
+        if (changes === 0) return notFound("Role not found");
 
-        if (error) throw error;
+        const role = queryOne(
+            "SELECT * FROM Role WHERE id = ? AND coordinatorId = ?",
+            [id, session.sub]
+        );
         return NextResponse.json(role);
-    } catch (error: any) {
-        if (error instanceof z.ZodError) {
-            return NextResponse.json({ error: "Validation Error", details: error.issues }, { status: 400 });
-        }
-        console.error("[PUT /api/roles/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("PUT /api/roles/:id", err);
     }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-    const { id } = await params;
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (!user || user.user_metadata?.type !== "COORDINATOR") {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
+export async function DELETE(_req: Request, { params }: RouteContext) {
     try {
-        const { error } = await supabase
-            .from("Role")
-            .delete()
-            .eq("id", id)
-            .eq("coordinatorId", user.id);
+        const session = await requireCoordinator();
+        const { id } = await params;
 
-        if (error) throw error;
+        // Collaborator.roleId é ON DELETE RESTRICT: apagar um cargo em uso
+        // estourava a FK e devolvia um 500 genérico. Checamos antes para
+        // devolver uma mensagem que o coordenador consegue agir sobre.
+        const inUse = queryOne<{ total: number }>(
+            "SELECT COUNT(*) as total FROM Collaborator WHERE roleId = ?",
+            [id]
+        );
+        if (inUse && inUse.total > 0) {
+            return badRequest(
+                `Este cargo está vinculado a ${inUse.total} colaborador(es). ` +
+                    "Altere o cargo dessas pessoas antes de removê-lo."
+            );
+        }
+
+        const { changes } = execute(
+            "DELETE FROM Role WHERE id = ? AND coordinatorId = ?",
+            [id, session.sub]
+        );
+        if (changes === 0) return notFound("Role not found");
+
         return NextResponse.json({ success: true });
-    } catch (error: any) {
-        console.error("[DELETE /api/roles/:id]", error);
-        return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    } catch (err) {
+        return handleApiError("DELETE /api/roles/:id", err);
     }
 }

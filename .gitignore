@@ -33,6 +33,18 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# segredo de sessão gerado ao lado do executável
+mysquads-secret.key
+
+# artefatos do build-exe.bat (o .exe passa de 450 MB — não versionar)
+mysquads.exe
+mysquads.zip
+
+# banco SQLite local (criado pelo seed / pelo executável)
+dev.db
+dev.db-shm
+dev.db-wal
+
 # vercel
 .vercel
 

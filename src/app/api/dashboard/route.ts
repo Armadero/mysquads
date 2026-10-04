@@ -1,160 +1,271 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { differenceInDays, differenceInYears } from "date-fns";
+import { queryAll } from "@/lib/db";
+import { differenceInDays } from "date-fns";
+import { getYearUTC, isSameMonthUTC, yearsSince } from "@/lib/utils";
+import { handleApiError } from "@/lib/api/responses";
+import { requireUser } from "@/lib/auth/guards";
 
-export async function GET() {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+interface Role {
+    id: number;
+    name: string;
+    defaultColor: string;
+}
 
-    const userId = user.id;
-    const userType = user.user_metadata?.type;
+interface Squad {
+    id: number;
+    name: string;
+    memberCount: number;
+}
 
-    const buildCoordinatorMetrics = async (coordinatorId: string) => {
-        // Paraleliza as queries independentes
-        const [{ data: collaborators }, { data: squads }, { data: roles }] = await Promise.all([
-            supabase
-                .from("Collaborator")
-                .select(`
-          *,
-          role:Role(*),
-          events:IntegrationEventCollaborator(event:IntegrationEvent(*)),
-          timeBankEntries:TimeBankEntry(*),
-          squads:SquadCollaborator(squad:Squad(*))
-        `)
-                .eq("coordinatorId", coordinatorId),
-            supabase
-                .from("Squad")
-                .select(`
-          *,
-          collaborators:SquadCollaborator(*)
-        `)
-                .eq("coordinatorId", coordinatorId),
-            supabase
-                .from("Role")
-                .select("*")
-                .eq("coordinatorId", coordinatorId),
-        ]);
+interface TimeBankEntry {
+    balanceHours: number;
+    expirationDate: string;
+}
 
-        const collabList = collaborators || [];
-        const squadList = squads || [];
-        const roleList = roles || [];
+interface Collaborator {
+    id: number;
+    name: string;
+    admissionDate: string;
+    birthDate: string | null;
+    deliveryAddress: string | null;
+    photoUrl: string | null;
+    roleId: number | null;
+    role: Role | null;
+    squads: Squad[];
+    events: { eventId: number }[];
+    timeBankEntries: TimeBankEntry[];
+}
 
-        const today = new Date();
+interface CollabSummary {
+    id: number;
+    name: string;
+    deliveryAddress: string | null;
+    role: Role | null;
+    photoUrl: string | null;
+    squads: Squad[];
+}
 
-        const companyAnniversaries = collabList.filter((c: any) => {
-            const date = new Date(c.admissionDate);
-            return date.getMonth() === today.getMonth() && date.getFullYear() < today.getFullYear();
-        });
+// ─── Metric builders ──────────────────────────────────────────────────────────
 
-        const birthdays = collabList.filter((c: any) => {
-            if (!c.birthDate) return false;
-            return new Date(c.birthDate).getMonth() === today.getMonth();
-        });
+function buildCoordinatorMetrics(coordinatorId: string | number) {
+    // One query per relation (was: N+1 per collaborator)
+    const rawCollabs = queryAll<Record<string, unknown>>(
+        `SELECT c.*,
+                CASE WHEN r.id IS NOT NULL
+                     THEN json_object('id', r.id, 'name', r.name, 'defaultColor', r.defaultColor)
+                     ELSE NULL
+                END as role
+         FROM Collaborator c
+         LEFT JOIN Role r ON c.roleId = r.id
+         WHERE c.coordinatorId = ?`,
+        [coordinatorId]
+    );
 
-        const roleDistribution = roleList.map((r: any) => ({
-            name: r.name,
-            count: collabList.filter((c: any) => c.roleId === r.id).length
-        }));
+    const collabIds = rawCollabs.map((c) => c.id as number);
 
-        const squadSizes = squadList.map((s: any) => ({
-            name: s.name,
-            count: s.collaborators?.length || 0
-        }));
+    const squadMap = new Map<number, Squad[]>();
+    const eventMap = new Map<number, { eventId: number }[]>();
+    const timebankMap = new Map<number, TimeBankEntry[]>();
 
-        const noIntegration = collabList
-            .filter((c: any) => !c.events || c.events.length === 0)
-            .map((c: any) => {
-                const years = differenceInYears(today, new Date(c.admissionDate));
-                return {
-                    id: c.id,
-                    name: c.name,
-                    years,
-                    deliveryAddress: c.deliveryAddress,
-                    role: c.role,
-                    squads: (c.squads || []).map((s: any) => s.squad),
-                    photoUrl: c.photoUrl,
-                    color: years >= 2 ? "red" : years >= 1 ? "yellow" : "normal"
-                };
-            });
+    if (collabIds.length > 0) {
+        const placeholders = collabIds.map(() => "?").join(",");
 
-        const highTimebank: object[] = [];
-        const expiringTimebank: object[] = [];
-
-        for (const c of collabList) {
-            const collabData = {
-                id: c.id,
-                name: c.name,
-                deliveryAddress: c.deliveryAddress,
-                role: c.role,
-                photoUrl: c.photoUrl,
-                squads: (c.squads || []).map((s: any) => s.squad).filter(Boolean)
-            };
-
-            for (const entry of (c.timeBankEntries || [])) {
-                if (Math.abs(entry.balanceHours) >= 40) {
-                    highTimebank.push({ ...collabData, balance: entry.balanceHours });
-                }
-                const daysLeft = differenceInDays(new Date(entry.expirationDate), today);
-                if (daysLeft >= 0 && daysLeft <= 30) {
-                    expiringTimebank.push({ ...collabData, daysLeft, balance: entry.balanceHours, expiration: entry.expirationDate });
-                }
-            }
+        const squadRows = queryAll<{ collaboratorId: number } & Squad>(
+            `SELECT sc.collaboratorId, s.*, 0 as memberCount
+             FROM SquadCollaborator sc
+             JOIN Squad s ON sc.squadId = s.id
+             WHERE sc.collaboratorId IN (${placeholders})`,
+            collabIds
+        );
+        for (const row of squadRows) {
+            const list = squadMap.get(row.collaboratorId) || [];
+            list.push(row);
+            squadMap.set(row.collaboratorId, list);
         }
 
+        const eventRows = queryAll<{ collaboratorId: number; eventId: number }>(
+            `SELECT collaboratorId, eventId FROM IntegrationEventCollaborator
+             WHERE collaboratorId IN (${placeholders})`,
+            collabIds
+        );
+        for (const row of eventRows) {
+            const list = eventMap.get(row.collaboratorId) || [];
+            list.push({ eventId: row.eventId });
+            eventMap.set(row.collaboratorId, list);
+        }
+
+        const timebankRows = queryAll<
+            { collaboratorId: number } & TimeBankEntry
+        >(
+            `SELECT collaboratorId, balanceHours, expirationDate FROM TimeBankEntry
+             WHERE collaboratorId IN (${placeholders})`,
+            collabIds
+        );
+        for (const row of timebankRows) {
+            const list = timebankMap.get(row.collaboratorId) || [];
+            list.push({
+                balanceHours: row.balanceHours,
+                expirationDate: row.expirationDate,
+            });
+            timebankMap.set(row.collaboratorId, list);
+        }
+    }
+
+    const collabList: Collaborator[] = rawCollabs.map((c) => {
+        const id = c.id as number;
         return {
-            totalCollaborators: collabList.length,
-            companyAnniversaries: companyAnniversaries.map((c: any) => ({
-                id: c.id,
-                name: c.name,
-                admissionDate: c.admissionDate,
-                deliveryAddress: c.deliveryAddress,
-                role: c.role,
-                photoUrl: c.photoUrl,
-                squads: (c.squads || []).map((s: any) => s.squad).filter(Boolean)
-            })),
-            birthdays: birthdays.map((c: any) => ({
-                id: c.id,
-                name: c.name,
-                birthDate: c.birthDate,
-                deliveryAddress: c.deliveryAddress,
-                role: c.role,
-                photoUrl: c.photoUrl,
-                squads: (c.squads || []).map((s: any) => s.squad).filter(Boolean)
-            })),
-            roleDistribution,
-            squadSizes,
-            noIntegration,
-            highTimebank,
-            expiringTimebank
+            id,
+            name: c.name as string,
+            admissionDate: c.admissionDate as string,
+            birthDate: (c.birthDate as string) || null,
+            deliveryAddress: (c.deliveryAddress as string) || null,
+            photoUrl: (c.photoUrl as string) || null,
+            roleId: (c.roleId as number) || null,
+            role: c.role ? (JSON.parse(c.role as string) as Role) : null,
+            squads: squadMap.get(id) || [],
+            events: eventMap.get(id) || [],
+            timeBankEntries: timebankMap.get(id) || [],
         };
+    });
+
+    const squadList = queryAll<Squad>(
+        `SELECT s.id, s.name, COUNT(sc.id) as memberCount
+         FROM Squad s
+         LEFT JOIN SquadCollaborator sc ON sc.squadId = s.id
+         WHERE s.coordinatorId = ?
+         GROUP BY s.id`,
+        [coordinatorId]
+    );
+
+    const roleList = queryAll<Role>(
+        `SELECT id, name, defaultColor FROM Role WHERE coordinatorId = ?`,
+        [coordinatorId]
+    );
+
+    const today = new Date();
+
+    // Datas são gravadas como meia-noite UTC — ler em UTC evita o off-by-one
+    // que jogava o dia 1º de cada mês para o mês anterior em fusos negativos.
+    const companyAnniversaries = collabList.filter((c) => {
+        const year = getYearUTC(c.admissionDate);
+        return (
+            isSameMonthUTC(c.admissionDate, today) &&
+            year !== null &&
+            year < today.getUTCFullYear()
+        );
+    });
+
+    const birthdays = collabList.filter((c) => isSameMonthUTC(c.birthDate, today));
+
+    const roleDistribution = roleList.map((r) => ({
+        name: r.name,
+        count: collabList.filter((c) => c.roleId === r.id).length,
+    }));
+
+    const squadSizes = squadList.map((s) => ({
+        name: s.name,
+        count: s.memberCount || 0,
+    }));
+
+    const toSummary = (c: Collaborator): CollabSummary => ({
+        id: c.id,
+        name: c.name,
+        deliveryAddress: c.deliveryAddress,
+        role: c.role,
+        photoUrl: c.photoUrl,
+        squads: c.squads,
+    });
+
+    const noIntegration = collabList
+        .filter((c) => c.events.length === 0)
+        .map((c) => {
+            const years = yearsSince(c.admissionDate, today);
+            return {
+                ...toSummary(c),
+                years,
+                color: years >= 2 ? "red" : years >= 1 ? "yellow" : "normal",
+            };
+        });
+
+    const highTimebank: (CollabSummary & { balance: number })[] = [];
+    const expiringTimebank: (CollabSummary & {
+        daysLeft: number;
+        balance: number;
+        expiration: string;
+    })[] = [];
+
+    for (const c of collabList) {
+        const summary = toSummary(c);
+        for (const entry of c.timeBankEntries) {
+            // 1 casa decimal: o valor bruto (8.333333333333) vazava direto
+            // para os cartões de alerta do painel.
+            const balance = Math.round(entry.balanceHours * 10) / 10;
+
+            if (Math.abs(entry.balanceHours) >= 40) {
+                highTimebank.push({ ...summary, balance });
+            }
+            const daysLeft = differenceInDays(
+                new Date(entry.expirationDate),
+                today
+            );
+            if (daysLeft >= 0 && daysLeft <= 30) {
+                expiringTimebank.push({
+                    ...summary,
+                    daysLeft,
+                    balance,
+                    expiration: entry.expirationDate,
+                });
+            }
+        }
+    }
+
+    return {
+        totalCollaborators: collabList.length,
+        companyAnniversaries: companyAnniversaries.map((c) => ({
+            ...toSummary(c),
+            admissionDate: c.admissionDate,
+        })),
+        birthdays: birthdays.map((c) => ({
+            ...toSummary(c),
+            birthDate: c.birthDate,
+        })),
+        roleDistribution,
+        squadSizes,
+        noIntegration,
+        highTimebank,
+        expiringTimebank,
     };
+}
 
-    if (userType === "COORDINATOR") {
-        const metrics = await buildCoordinatorMetrics(userId);
-        return NextResponse.json({ metrics, coordinatorMode: true });
-    } else if (userType === "MANAGER") {
-        // MANAGER
-        const { data: links } = await supabase
-            .from("ManagerCoordinatorLink")
-            .select(`
-        coordinatorId,
-        coordinator:User!coordinatorId(*)
-      `)
-            .eq("managerId", userId)
-            .eq("status", "APPROVED");
+// ─── Route handler ────────────────────────────────────────────────────────────
 
-        const managerMetrics = await Promise.all(
-            (links || []).map(async (link: any) => ({
-                // Assuming the foreign key reference User!coordinatorId fetches the User relation correctly
-                coordinatorName: link.coordinator?.name || "Unknown",
-                metrics: await buildCoordinatorMetrics(link.coordinatorId)
-            }))
+export async function GET() {
+    try {
+        const session = await requireUser();
+
+        if (session.type === "COORDINATOR") {
+            const metrics = buildCoordinatorMetrics(session.sub);
+            return NextResponse.json({ metrics, coordinatorMode: true });
+        }
+
+        // MANAGER: aggregate over linked coordinators
+        const links = queryAll<{ coordinatorId: number; coordinatorName: string }>(
+            `SELECT l.coordinatorId, u.name as coordinatorName
+             FROM ManagerCoordinatorLink l
+             JOIN User u ON l.coordinatorId = u.id
+             WHERE l.managerId = ? AND l.status = 'APPROVED'`,
+            [session.sub]
         );
 
+        const managerMetrics = links.map((link) => ({
+            coordinatorName: link.coordinatorName || "Unknown",
+            metrics: buildCoordinatorMetrics(link.coordinatorId),
+        }));
+
         return NextResponse.json({ managerMetrics, coordinatorMode: false });
-    } else {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    } catch (err) {
+        return handleApiError("GET /api/dashboard", err);
     }
 }
