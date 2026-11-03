@@ -1,8 +1,9 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
-import { Plus, Trash2, Users, Layout, GripVertical, ChevronRight, Monitor, ExternalLink, Pencil, AlertCircle } from "lucide-react";
+import { Plus, Trash2, Users, Layout, GripVertical, ChevronRight, Monitor, ExternalLink, Pencil, AlertCircle, ArrowRightLeft } from "lucide-react";
 import { FormModal } from "@/components/ui/form-modal";
+import { TransferModal } from "@/components/ui/transfer-modal";
 import { useSession } from "@/lib/hooks/use-session";
 import { PageLoader } from "@/components/ui/page-state";
 import { describeApiError } from "@/lib/utils";
@@ -26,6 +27,7 @@ export default function SquadsPage() {
     const [formError, setFormError] = useState("");
     const [saving, setSaving] = useState(false);
     const [view, setView] = useState<'LIST' | 'EDIT'>('LIST');
+    const [transferSquad, setTransferSquad] = useState<any>(null);
     const [selectedSquadId, setSelectedSquadId] = useState<string | number | null>(null);
 
     const fetchSquads = useCallback(async () => {
@@ -215,6 +217,15 @@ export default function SquadsPage() {
                             </button>
                         )}
                     </div>
+
+                    <TransferModal
+                        open={transferSquad != null}
+                        onClose={() => setTransferSquad(null)}
+                        title="Transferir Squad"
+                        description={`O squad "${transferSquad?.name ?? ""}" e seus ${transferSquad?.collaborators?.length ?? 0} colaborador(es) passarão para outro coordenador. Os colaboradores serão removidos de outros squads seus.`}
+                        endpoint={`/api/squads/${transferSquad?.id}/transfer`}
+                        onDone={() => { fetchSquads(); fetchCollaborators(); }}
+                    />
 
                     <FormModal
                         open={isFormOpen}
@@ -426,6 +437,13 @@ export default function SquadsPage() {
                                                             title="Editar dados do squad"
                                                         >
                                                             <Pencil size={16} />
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setTransferSquad(squad)}
+                                                            className="p-2 text-zinc-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-all"
+                                                            title="Transferir squad e colaboradores"
+                                                        >
+                                                            <ArrowRightLeft size={16} />
                                                         </button>
                                                         <button
                                                             onClick={() => deleteSquad(squad.id)}
