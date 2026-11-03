@@ -49,6 +49,7 @@ export default function CollaboratorsPage() {
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState("");
     const [transferCollab, setTransferCollab] = useState<any>(null);
+    const [notice, setNotice] = useState("");
     /** Instante de referência para calcular "ativo/desligado", fixo por montagem. */
     const [mountedAt] = useState(() => Date.now());
 
@@ -352,8 +353,17 @@ export default function CollaboratorsPage() {
                 title="Transferir Colaborador"
                 description={`"${transferCollab?.name ?? ""}" passará para outro coordenador e será removido dos seus squads, eventos e campanhas.`}
                 endpoint={`/api/collaborators/${transferCollab?.id}/transfer`}
-                onDone={fetchCollaborators}
+                onDone={() => {
+                    setNotice(`"${transferCollab?.name ?? "Colaborador"}" foi transferido com sucesso.`);
+                    fetchCollaborators();
+                }}
             />
+            {notice && (
+                <div role="status" className="flex items-center justify-between gap-2 p-3 bg-green-50 dark:bg-green-900/10 border border-green-100 dark:border-green-900/30 text-green-700 dark:text-green-400 text-xs font-semibold rounded-lg">
+                    <span className="flex items-center gap-2"><CheckCircle size={14} className="shrink-0" />{notice}</span>
+                    <button type="button" onClick={() => setNotice("")} className="text-green-700/70 hover:text-green-700 dark:text-green-400/70 dark:hover:text-green-400" aria-label="Fechar aviso">&times;</button>
+                </div>
+            )}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-zinc-200 dark:border-zinc-800 pb-6">
                 <div>
                     <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Colaboradores</h1>

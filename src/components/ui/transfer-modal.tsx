@@ -12,7 +12,8 @@ interface TransferModalProps {
     description: string;
     /** Endpoint POST que recebe `{ targetEmail }`. */
     endpoint: string;
-    onDone: () => void;
+    /** Chamado após sucesso, com o corpo da resposta da API. */
+    onDone: (data: { collaboratorsMoved?: number }) => void;
 }
 
 export function TransferModal({ open, onClose, title, description, endpoint, onDone }: TransferModalProps) {
@@ -41,8 +42,9 @@ export function TransferModal({ open, onClose, title, description, endpoint, onD
                 setError(describeApiError(data, "Não foi possível transferir."));
                 return;
             }
+            const data = await res.json().catch(() => ({}));
             setEmail("");
-            onDone();
+            onDone(data);
             onClose();
         } catch {
             setError("Erro de conexão com o servidor.");

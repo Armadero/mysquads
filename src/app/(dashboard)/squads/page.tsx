@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
-import { Plus, Trash2, Users, Layout, GripVertical, ChevronRight, Monitor, ExternalLink, Pencil, AlertCircle, ArrowRightLeft } from "lucide-react";
+import { Plus, Trash2, Users, Layout, GripVertical, ChevronRight, Monitor, ExternalLink, Pencil, AlertCircle, ArrowRightLeft, CheckCircle } from "lucide-react";
 import { FormModal } from "@/components/ui/form-modal";
 import { TransferModal } from "@/components/ui/transfer-modal";
 import { useSession } from "@/lib/hooks/use-session";
@@ -28,6 +28,7 @@ export default function SquadsPage() {
     const [saving, setSaving] = useState(false);
     const [view, setView] = useState<'LIST' | 'EDIT'>('LIST');
     const [transferSquad, setTransferSquad] = useState<any>(null);
+    const [notice, setNotice] = useState("");
     const [selectedSquadId, setSelectedSquadId] = useState<string | number | null>(null);
 
     const fetchSquads = useCallback(async () => {
@@ -224,8 +225,20 @@ export default function SquadsPage() {
                         title="Transferir Squad"
                         description={`O squad "${transferSquad?.name ?? ""}" e seus ${transferSquad?.collaborators?.length ?? 0} colaborador(es) passarão para outro coordenador. Os colaboradores serão removidos de outros squads seus.`}
                         endpoint={`/api/squads/${transferSquad?.id}/transfer`}
-                        onDone={() => { fetchSquads(); fetchCollaborators(); }}
+                        onDone={(data) => {
+                            const n = data?.collaboratorsMoved ?? 0;
+                            setNotice(`Squad "${transferSquad?.name ?? ""}" transferido com sucesso (${n} colaborador${n === 1 ? "" : "es"}).`);
+                            fetchSquads();
+                            fetchCollaborators();
+                        }}
                     />
+
+                    {notice && (
+                                    <div role="status" className="flex items-center justify-between gap-2 p-3 bg-green-50 dark:bg-green-900/10 border border-green-100 dark:border-green-900/30 text-green-700 dark:text-green-400 text-xs font-semibold rounded-lg">
+                                        <span className="flex items-center gap-2"><CheckCircle size={14} className="shrink-0" />{notice}</span>
+                                        <button type="button" onClick={() => setNotice("")} className="text-green-700/70 hover:text-green-700 dark:text-green-400/70 dark:hover:text-green-400" aria-label="Fechar aviso">&times;</button>
+                                    </div>
+                                )}
 
                     <FormModal
                         open={isFormOpen}
