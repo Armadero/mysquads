@@ -1,8 +1,9 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
-import { Plus, Trash2, Users, Layout, GripVertical, ChevronRight, Monitor, ExternalLink, Pencil, AlertCircle } from "lucide-react";
+import { Plus, Trash2, Users, Layout, GripVertical, ChevronRight, Monitor, ExternalLink, Pencil, AlertCircle, ArrowRightLeft, CheckCircle } from "lucide-react";
 import { FormModal } from "@/components/ui/form-modal";
+import { TransferModal } from "@/components/ui/transfer-modal";
 import { useSession } from "@/lib/hooks/use-session";
 import { PageLoader } from "@/components/ui/page-state";
 import { describeApiError } from "@/lib/utils";
@@ -26,6 +27,8 @@ export default function SquadsPage() {
     const [formError, setFormError] = useState("");
     const [saving, setSaving] = useState(false);
     const [view, setView] = useState<'LIST' | 'EDIT'>('LIST');
+    const [transferSquad, setTransferSquad] = useState<any>(null);
+    const [notice, setNotice] = useState("");
     const [selectedSquadId, setSelectedSquadId] = useState<string | number | null>(null);
 
     const fetchSquads = useCallback(async () => {
@@ -215,6 +218,27 @@ export default function SquadsPage() {
                             </button>
                         )}
                     </div>
+
+                    <TransferModal
+                        open={transferSquad != null}
+                        onClose={() => setTransferSquad(null)}
+                        title="Transferir Squad"
+                        description={`O squad "${transferSquad?.name ?? ""}" e seus ${transferSquad?.collaborators?.length ?? 0} colaborador(es) passarão para outro coordenador. Os colaboradores serão removidos de outros squads seus.`}
+                        endpoint={`/api/squads/${transferSquad?.id}/transfer`}
+                        onDone={(data) => {
+                            const n = data?.collaboratorsMoved ?? 0;
+                            setNotice(`Squad "${transferSquad?.name ?? ""}" transferido com sucesso (${n} colaborador${n === 1 ? "" : "es"}).`);
+                            fetchSquads();
+                            fetchCollaborators();
+                        }}
+                    />
+
+                    {notice && (
+                                    <div role="status" className="flex items-center justify-between gap-2 p-3 bg-green-50 dark:bg-green-900/10 border border-green-100 dark:border-green-900/30 text-green-700 dark:text-green-400 text-xs font-semibold rounded-lg">
+                                        <span className="flex items-center gap-2"><CheckCircle size={14} className="shrink-0" />{notice}</span>
+                                        <button type="button" onClick={() => setNotice("")} className="text-green-700/70 hover:text-green-700 dark:text-green-400/70 dark:hover:text-green-400" aria-label="Fechar aviso">&times;</button>
+                                    </div>
+                                )}
 
                     <FormModal
                         open={isFormOpen}
@@ -426,6 +450,13 @@ export default function SquadsPage() {
                                                             title="Editar dados do squad"
                                                         >
                                                             <Pencil size={16} />
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setTransferSquad(squad)}
+                                                            className="p-2 text-zinc-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-all"
+                                                            title="Transferir squad e colaboradores"
+                                                        >
+                                                            <ArrowRightLeft size={16} />
                                                         </button>
                                                         <button
                                                             onClick={() => deleteSquad(squad.id)}
