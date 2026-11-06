@@ -1,11 +1,25 @@
 "use client";
 import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { ChevronLeft, Users, Gift, Cake, AlertTriangle, Download } from "lucide-react";
+import { ChevronLeft, Users, Gift, Cake, AlertTriangle, Download, CalendarPlus } from "lucide-react";
 import { formatDate, formatDayMonth } from "@/lib/utils";
 import { useSession } from "@/lib/hooks/use-session";
 import { PageLoader } from "@/components/ui/page-state";
 import { roleLabel } from "@/lib/labels";
+import { buildBirthdaysIcs } from "@/lib/ics";
+
+function downloadFile(content: string, mime: string, filename: string) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
 
 const LIST_KEYS: Record<string, string> = {
     "company-anniversary": "companyAnniversaries",
@@ -95,6 +109,16 @@ function CollaboratorsListContent() {
         document.body.removeChild(link);
     };
 
+    const handleExportICS = () => {
+        if (data.length === 0) return;
+        const ics = buildBirthdaysIcs(data);
+        downloadFile(
+            ics,
+            "text/calendar;charset=utf-8;",
+            `aniversarios_${new Date().toISOString().split("T")[0]}.ics`
+        );
+    };
+
     const getHeaderInfo = () => {
         switch (type) {
             case "company-anniversary":
@@ -136,6 +160,15 @@ function CollaboratorsListContent() {
                     >
                         <Download size={14} /> Exportar Lista
                     </button>
+                    {type === "birthday" && (
+                        <button
+                            onClick={handleExportICS}
+                            disabled={data.length === 0}
+                            className="flex items-center gap-2 bg-purple-100 dark:bg-purple-900/30 hover:bg-purple-200 dark:hover:bg-purple-900/50 text-purple-700 dark:text-purple-300 px-4 py-2 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <CalendarPlus size={14} /> Exportar ICS
+                        </button>
+                    )}
                 </div>
             </div>
 
