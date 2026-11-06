@@ -46,8 +46,8 @@ function icsDate(year: number, month: number, day: number): string {
 }
 
 /**
- * Gera um calendário iCalendar (.ics) com um evento de dia inteiro, repetido
- * anualmente, para cada aniversariante. Colaboradores sem data de nascimento
+ * Gera um calendário iCalendar (.ics) com um evento de meia hora (08:00 às
+ * 08:30), repetido anualmente, para cada aniversariante. Colaboradores sem data de nascimento
  * válida são ignorados. Quem nasceu em 29/02 comemora em 28/02 nos anos não
  * bissextos.
  */
@@ -85,20 +85,19 @@ export function buildBirthdaysIcs(
         // DTSTART precisa ser uma data válida: em ano não bissexto usa 28/02.
         const isLeapYear = new Date(Date.UTC(year, 1, 29)).getUTCMonth() === 1;
         const startDay = leapDay && !isLeapYear ? 28 : day;
-        const start = new Date(Date.UTC(year, m - 1, startDay));
-        const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+        const date = icsDate(year, m, startDay);
 
         lines.push(
             "BEGIN:VEVENT",
             `UID:${uid}`,
             `DTSTAMP:${stamp}`,
-            `DTSTART;VALUE=DATE:${icsDate(start.getUTCFullYear(), start.getUTCMonth() + 1, start.getUTCDate())}`,
-            `DTEND;VALUE=DATE:${icsDate(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate())}`,
+            // Horário "flutuante" (sem fuso): 08:00 no fuso de quem importar.
+            `DTSTART:${date}T080000`,
+            `DTEND:${date}T083000`,
             leapDay
                 ? "RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=28,29;BYSETPOS=-1"
                 : "RRULE:FREQ=YEARLY",
             `SUMMARY:${escapeText(`🎂 Aniversário de ${p.name}`)}`,
-            "TRANSP:TRANSPARENT",
             "END:VEVENT"
         );
     });
